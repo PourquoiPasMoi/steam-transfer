@@ -18,6 +18,9 @@ pub struct Settings {
     pub move_to: Option<String>,
     /// Where torrent downloads are saved.
     pub download_dir: Option<String>,
+    /// Torrent speed limits in KB/s (0 or missing = unlimited).
+    pub torrent_down_kbps: Option<u32>,
+    pub torrent_up_kbps: Option<u32>,
     /// Check GitHub for a new version at startup.
     pub auto_update_check: Option<bool>,
 }

@@ -293,15 +293,30 @@ async fn torrent_list(app: AppHandle) -> CmdResult<Vec<torrent::TorrentDto>> {
 }
 
 #[tauri::command]
-async fn torrent_pause(app: AppHandle, id: usize) -> CmdResult<()> {
+async fn torrent_pause(app: AppHandle, key: String) -> CmdResult<()> {
     let torrents = app.state::<AppState>().torrents.clone();
-    torrents.pause(id).await
+    torrents.pause(&key).await
 }
 
 #[tauri::command]
-async fn torrent_resume(app: AppHandle, id: usize) -> CmdResult<()> {
+async fn torrent_resume(app: AppHandle, key: String) -> CmdResult<()> {
     let torrents = app.state::<AppState>().torrents.clone();
-    torrents.resume(id).await
+    torrents.resume(&key).await
+}
+
+/// Download / upload limits in KB/s (0 = unlimited). Saved in settings and applied right away.
+#[tauri::command]
+fn torrent_set_limits(app: AppHandle, state: tauri::State<'_, AppState>, down_kbps: u32, up_kbps: u32) -> CmdResult<()> {
+    state.torrents.set_limits(kbps_limits(down_kbps, up_kbps));
+    let mut settings = state.settings.lock().unwrap();
+    settings.torrent_down_kbps = Some(down_kbps);
+    settings.torrent_up_kbps = Some(up_kbps);
+    settings::save(&app, &settings)
+}
+
+fn kbps_limits(down_kbps: u32, up_kbps: u32) -> torrent::Limits {
+    let bps = |k: u32| (k > 0).then(|| k.saturating_mul(1024));
+    torrent::Limits { down_bps: bps(down_kbps), up_bps: bps(up_kbps) }
 }
 
 #[tauri::command]
@@ -471,6 +486,7 @@ pub fn run() {
             let art: covers::ArtMap = Default::default();
             let covers = covers::Covers::new(&data_dir, art.clone());
             let torrents = torrent::Torrents::new(data_dir, downloads, covers.clone());
+            torrents.set_limits(kbps_limits(settings.torrent_down_kbps.unwrap_or(0), settings.torrent_up_kbps.unwrap_or(0)));
             // Resume unfinished downloads from last time in the background.
             if torrents.has_saved_session() {
                 let t = torrents.clone();
@@ -478,6 +494,9 @@ pub fn run() {
                     let _ = t.session().await;
                 });
             }
+            // and ones that were still fetching their info
+            let t = torrents.clone();
+            tauri::async_runtime::spawn(async move { t.restore_pending() });
             app.manage(AppState { queue, art, settings: Mutex::new(settings), torrents, covers });
             Ok(())
         })
@@ -511,6 +530,7 @@ pub fn run() {
             pick_cover_image,
             torrent_set_cover,
             torrent_reset_cover,
+            torrent_set_limits,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Steam Transfer");

@@ -2,7 +2,8 @@
 //!
 //! Order of preference: an image the user picked, an image that came with the download
 //! (cover / poster / folder picture, once it has finished), the closest match on the Steam store,
-//! otherwise none (the UI draws a blank CD-R). Images are cached in the app data folder and
+//! then the matching Wikipedia article's picture, otherwise none (the UI draws a blank CD-R).
+//! Lookups start as soon as a download's name is known, so the cover shows while it downloads. Images are cached in the app data folder and
 //! served through the app's art:// protocol, so they also work offline.
 
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,56 @@ enum Entry {
     Custom { file: PathBuf },
     Included { file: PathBuf },
     Steam { app_id: String, title: String, file: PathBuf },
-    /// looked up, nothing found
-    Missing,
+    Wikipedia { title: String, file: PathBuf },
+    /// looked up successfully but nothing matched (retried after a day)
+    Missing {
+        #[serde(default)]
+        at: u64,
+    },
+}
+
+const MISSING_RETRY_SECS: u64 = 24 * 3600;
+const FAILED_RETRY_SECS: u64 = 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Decode HTML entities that some sites leave in torrent names (&#039; &amp; &quot; ...).
+pub fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let decoded = tail.find(';').filter(|&end| end <= 10).and_then(|end| {
+            let entity = &tail[1..end];
+            let ch = match entity {
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "nbsp" => Some(' '),
+                _ if entity.starts_with("#x") || entity.starts_with("#X") => u32::from_str_radix(&entity[2..], 16).ok().and_then(char::from_u32),
+                _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
+                _ => None,
+            };
+            ch.map(|c| (c, end))
+        });
+        match decoded {
+            Some((c, end)) => {
+                out.push(c);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -33,6 +82,8 @@ pub struct Covers {
     dir: PathBuf,
     db: Mutex<Db>,
     inflight: Mutex<HashSet<String>>,
+    /// when a lookup last failed (network error), to wait a bit before trying again
+    failed: Mutex<HashMap<String, u64>>,
     art: ArtMap,
 }
 
@@ -47,7 +98,7 @@ fn words(s: &str) -> Vec<String> {
 
 /// Turn a download name like "Some.Game.v1.2.3-[Extras]_x64.iso" into a store search term ("Some Game").
 pub fn search_term(name: &str) -> String {
-    let mut s = name.trim().to_string();
+    let mut s = decode_entities(name.trim());
     // drop a trailing file extension
     for ext in [".iso", ".zip", ".rar", ".7z", ".exe", ".mkv", ".mp4", ".avi", ".tar", ".gz", ".torrent"] {
         if s.to_lowercase().ends_with(ext) {
@@ -65,7 +116,20 @@ pub fn search_term(name: &str) -> String {
             _ => {}
         }
     }
-    let spaced: String = out.chars().map(|c| if matches!(c, '_' | '+' | '|' | '~') { ' ' } else { c }).collect();
+    // separators become spaces; a dash next to a digit too ("debian-13.8.0-amd64"), but not in "Spider-Man"
+    let chars: Vec<char> = out.chars().collect();
+    let spaced: String = chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let near_digit = |j: Option<&char>| j.map(|c| c.is_ascii_digit()).unwrap_or(false);
+            if matches!(c, '_' | '+' | '|' | '~') || (c == '-' && (near_digit(i.checked_sub(1).and_then(|j| chars.get(j))) || near_digit(chars.get(i + 1)))) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
     let digits = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit());
     let v_number = |p: &str| p.len() > 1 && (p.starts_with('v') || p.starts_with('V')) && digits(&p[1..]);
     // Split dotted names ("Some.Game.v1.2") into words, and stop at the first part that is clearly
@@ -78,10 +142,13 @@ pub fn search_term(name: &str) -> String {
             let lower = part.to_lowercase();
             let next_is_digits = parts.get(i + 1).map(|n| digits(n.trim_matches('-'))).unwrap_or(false);
             let is_version = v_number(part) || (digits(part) && next_is_digits) || (part.len() >= 5 && digits(part));
-            let is_tag = matches!(
-                lower.as_str(),
-                "build" | "update" | "x64" | "x86" | "win64" | "win32" | "windows" | "multi" | "proper" | "repack" | "dlc" | "dlcs"
-            );
+            let resolution = lower.ends_with('p') && lower.len() >= 4 && digits(&lower[..lower.len() - 1]);
+            let is_tag = resolution
+                || matches!(
+                    lower.as_str(),
+                    "build" | "update" | "x64" | "x86" | "win64" | "win32" | "windows" | "multi" | "proper" | "repack" | "dlc" | "dlcs"
+                        | "4k" | "uhd" | "hdr" | "x264" | "x265" | "h264" | "h265" | "hevc" | "bluray" | "webrip" | "web-dl" | "dvdrip" | "remux"
+                );
             if (is_version || is_tag) && !kept.is_empty() {
                 break 'outer;
             }
@@ -105,7 +172,8 @@ pub fn similarity(a: &str, b: &str) -> f64 {
     let shared = wa.intersection(&wb).count() as f64;
     let jaccard = shared / wa.union(&wb).count() as f64;
     let (na, nb) = (normalize(a), normalize(b));
-    let contains = !na.is_empty() && !nb.is_empty() && (na.contains(&nb) || nb.contains(&na));
+    let (short, long) = if na.len() <= nb.len() { (&na, &nb) } else { (&nb, &na) };
+    let contains = !short.is_empty() && long.contains(short.as_str()) && short.len() * 10 >= long.len() * 6;
     if contains {
         jaccard.max(0.75)
     } else {
@@ -161,7 +229,7 @@ impl Covers {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        Arc::new(Covers { dir, db: Mutex::new(db), inflight: Mutex::new(HashSet::new()), art })
+        Arc::new(Covers { dir, db: Mutex::new(db), inflight: Mutex::new(HashSet::new()), failed: Mutex::new(HashMap::new()), art })
     }
 
     fn save(&self) {
@@ -215,10 +283,23 @@ impl Covers {
         }
         let entry = self.db.lock().unwrap().entries.get(&key).cloned();
         match entry {
-            Some(Entry::Custom { file }) | Some(Entry::Included { file }) | Some(Entry::Steam { file, .. }) => self.url(&key, &file),
-            Some(Entry::Missing) => None,
-            None => {
-                self.start_lookup(name.to_string(), key);
+            Some(Entry::Custom { file })
+            | Some(Entry::Included { file })
+            | Some(Entry::Steam { file, .. })
+            | Some(Entry::Wikipedia { file, .. }) => {
+                let url = self.url(&key, &file);
+                if url.is_none() {
+                    // the cached picture was deleted - look it up again
+                    self.db.lock().unwrap().entries.remove(&key);
+                }
+                url
+            }
+            Some(Entry::Missing { at }) if now_secs().saturating_sub(at) < MISSING_RETRY_SECS => None,
+            _ => {
+                let recently_failed = self.failed.lock().unwrap().get(&key).map(|t| now_secs().saturating_sub(*t) < FAILED_RETRY_SECS).unwrap_or(false);
+                if !recently_failed {
+                    self.start_lookup(name.to_string(), key);
+                }
                 None
             }
         }
@@ -230,75 +311,169 @@ impl Covers {
         }
         let this = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            let result = this.lookup_steam(&name, &key).await;
-            {
-                let mut db = this.db.lock().unwrap();
-                // a picture the user chose meanwhile wins
-                if !db.entries.contains_key(&key) {
-                    db.entries.insert(key.clone(), result.unwrap_or(Entry::Missing));
+            match this.lookup(&name).await {
+                Ok(found) => {
+                    {
+                        let mut db = this.db.lock().unwrap();
+                        // a picture the user chose meanwhile wins
+                        let keep = matches!(db.entries.get(&key), Some(Entry::Custom { .. }) | Some(Entry::Included { .. }));
+                        if !keep {
+                            db.entries.insert(key.clone(), found.unwrap_or(Entry::Missing { at: now_secs() }));
+                        }
+                    }
+                    this.save();
+                }
+                // network trouble: remember nothing, try again shortly
+                Err(()) => {
+                    this.failed.lock().unwrap().insert(key.clone(), now_secs());
                 }
             }
-            this.save();
             this.inflight.lock().unwrap().remove(&key);
         });
     }
 
-    async fn lookup_steam(&self, name: &str, key: &str) -> Option<Entry> {
+    fn client() -> Option<reqwest::Client> {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent(concat!("SteamTransfer/", env!("CARGO_PKG_VERSION"), " (personal desktop app)"))
+            .build()
+            .ok()
+    }
+
+    /// Ok(Some) = found, Ok(None) = searched fine but nothing matched, Err = network trouble.
+    async fn lookup(&self, name: &str) -> Result<Option<Entry>, ()> {
         let term = search_term(name);
         if term.len() < 2 {
-            return None;
+            return Ok(None);
         }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .user_agent(concat!("SteamTransfer/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .ok()?;
+        let client = Self::client().ok_or(())?;
+        // Steam: the full name first, then shorter versions ("... Deluxe Edition" finds nothing on
+        // Steam's search, "..." does), keeping at least half the words.
+        let words: Vec<&str> = term.split_whitespace().collect();
+        let min_words = ((words.len() + 1) / 2).max(2).min(words.len());
+        let mut any_answer = false;
+        for len in (min_words..=words.len()).rev().take(4) {
+            let query = words[..len].join(" ");
+            match self.steam_search(&client, &query, &term).await {
+                Ok(Some(found)) => return Ok(Some(found)),
+                Ok(None) => any_answer = true,
+                Err(()) => {}
+            }
+        }
+        match self.wikipedia_search(&client, &term).await {
+            Ok(Some(found)) => Ok(Some(found)),
+            Ok(None) => Ok(None),
+            Err(()) if any_answer => Ok(None),
+            Err(()) => Err(()),
+        }
+    }
+
+    async fn download_image(&self, client: &reqwest::Client, url: &str, file: &Path) -> bool {
+        let Ok(resp) = client.get(url).send().await else { return false };
+        let is_image = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("image/"))
+            .unwrap_or(false);
+        if !resp.status().is_success() || !is_image {
+            return false;
+        }
+        match resp.bytes().await {
+            Ok(bytes) if bytes.len() >= 2000 => {
+                let _ = std::fs::create_dir_all(&self.dir);
+                std::fs::write(file, &bytes).is_ok()
+            }
+            _ => false,
+        }
+    }
+
+    async fn steam_search(&self, client: &reqwest::Client, term: &str, full_term: &str) -> Result<Option<Entry>, ()> {
         let url = tauri::Url::parse_with_params(
             "https://store.steampowered.com/api/storesearch/",
-            &[("term", term.as_str()), ("l", "english"), ("cc", "US")],
+            &[("term", term), ("l", "english"), ("cc", "US")],
         )
-        .ok()?;
-        let body: serde_json::Value = client.get(url).send().await.ok()?.json().await.ok()?;
-        let (app_id, title, score) = body["items"]
-            .as_array()?
-            .iter()
+        .map_err(|_| ())?;
+        let body: serde_json::Value = client.get(url).send().await.map_err(|_| ())?.json().await.map_err(|_| ())?;
+        let best = body["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .filter(|i| i["type"] == "app")
             .filter_map(|i| {
-                let title = i["name"].as_str()?.to_string();
+                let title = i["name"].as_str()?.trim().to_string();
                 let id = i["id"].as_u64()?.to_string();
-                Some((id, title.clone(), similarity(&term, &title)))
+                Some((id, title.clone(), similarity(term, &title)))
             })
-            .max_by(|a, b| a.2.total_cmp(&b.2))?;
-        if score < 0.5 {
-            return None;
+            .max_by(|a, b| a.2.total_cmp(&b.2));
+        let Some((app_id, title, score)) = best else { return Ok(None) };
+        // a shortened search must still resemble the full name ("Big Buck" must not pick "Big Buck Hunter")
+        if score < 0.6 || similarity(full_term, &title) < 0.6 {
+            return Ok(None);
         }
-        let _ = std::fs::create_dir_all(&self.dir);
-        let candidates = [
-            format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg"),
-            format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{app_id}/header.jpg"),
-        ];
-        for (i, url) in candidates.iter().enumerate() {
-            let Ok(resp) = client.get(url).send().await else { continue };
-            let is_image = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.starts_with("image/"))
-                .unwrap_or(false);
-            if !resp.status().is_success() || !is_image {
-                continue;
-            }
-            let Ok(bytes) = resp.bytes().await else { continue };
-            if bytes.len() < 2000 {
-                continue;
-            }
-            let file = self.dir.join(format!("steam-{app_id}-{}.jpg", if i == 0 { "cover" } else { "header" }));
-            if std::fs::write(&file, &bytes).is_ok() {
-                let _ = key;
-                return Some(Entry::Steam { app_id, title, file });
+        let mut urls = self.steam_artwork(client, &app_id).await;
+        urls.push(format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg"));
+        urls.push(format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{app_id}/header.jpg"));
+        for (i, url) in urls.iter().enumerate() {
+            let file = self.dir.join(format!("steam-{app_id}-{i}.jpg"));
+            if self.download_image(client, url, &file).await {
+                return Ok(Some(Entry::Steam { app_id, title, file }));
             }
         }
-        None
+        Ok(None)
+    }
+
+    /// Exact artwork addresses from Steam's store service: the tall library cover first, then the
+    /// wide header. Newer games keep artwork under hashed paths the plain URL pattern can't guess.
+    async fn steam_artwork(&self, client: &reqwest::Client, app_id: &str) -> Vec<String> {
+        let input = format!(
+            r#"{{"ids":[{{"appid":{app_id}}}],"context":{{"language":"english","country_code":"US"}},"data_request":{{"include_assets":true}}}}"#
+        );
+        let Ok(url) = tauri::Url::parse_with_params("https://api.steampowered.com/IStoreBrowseService/GetItems/v1/", &[("input_json", input.as_str())])
+        else {
+            return Vec::new();
+        };
+        let Ok(resp) = client.get(url).send().await else { return Vec::new() };
+        let Ok(body) = resp.json::<serde_json::Value>().await else { return Vec::new() };
+        let assets = &body["response"]["store_items"][0]["assets"];
+        let Some(format) = assets["asset_url_format"].as_str() else { return Vec::new() };
+        ["library_capsule_2x", "library_capsule", "header"]
+            .iter()
+            .filter_map(|k| assets[*k].as_str())
+            .map(|file| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/{}", format.replace("${FILENAME}", file)))
+            .collect()
+    }
+
+    async fn wikipedia_search(&self, client: &reqwest::Client, term: &str) -> Result<Option<Entry>, ()> {
+        let url = tauri::Url::parse_with_params(
+            "https://en.wikipedia.org/w/api.php",
+            &[
+                ("action", "query"),
+                ("generator", "search"),
+                ("gsrsearch", term),
+                ("gsrlimit", "3"),
+                ("prop", "pageimages"),
+                ("piprop", "thumbnail"),
+                ("pithumbsize", "600"),
+                ("format", "json"),
+                ("formatversion", "2"),
+            ],
+        )
+        .map_err(|_| ())?;
+        let body: serde_json::Value = client.get(url).send().await.map_err(|_| ())?.json().await.map_err(|_| ())?;
+        let mut pages: Vec<&serde_json::Value> = body["query"]["pages"].as_array().into_iter().flatten().collect();
+        pages.sort_by_key(|p| p["index"].as_u64().unwrap_or(99));
+        for page in pages {
+            let (Some(title), Some(thumb)) = (page["title"].as_str(), page["thumbnail"]["source"].as_str()) else { continue };
+            if similarity(term, title) < 0.34 {
+                continue;
+            }
+            let file = self.dir.join(format!("wiki-{}.jpg", normalize(title)));
+            if self.download_image(client, thumb, &file).await {
+                return Ok(Some(Entry::Wikipedia { title: title.to_string(), file }));
+            }
+        }
+        Ok(None)
     }
 
     /// Use a picture the user chose.
@@ -344,6 +519,11 @@ mod tests {
         assert_eq!(search_term("Hollow Knight (2017) [GOG]"), "Hollow Knight");
         assert_eq!(search_term("Celeste Build 12345678"), "Celeste");
         assert_eq!(search_term("Stardew Valley v1.6.15"), "Stardew Valley");
+        assert_eq!(search_term("Assassin&#039;s Creed Black Flag v1.0.6.10 + DLCs [Extras]"), "Assassin's Creed Black Flag");
+        assert_eq!(search_term("debian-13.8.0-amd64-netinst.iso"), "debian");
+        assert_eq!(search_term("Marvel's Spider-Man 2"), "Marvel's Spider-Man 2");
+        assert_eq!(search_term("Big Buck Bunny (2008) 1080p"), "Big Buck Bunny");
+        assert_eq!(decode_entities("Tom &amp; Jerry &#x27;s &bogus; 100&"), "Tom & Jerry 's &bogus; 100&");
         assert_eq!(search_term("Stardew_Valley_1.6.15_(64bit)"), "Stardew Valley");
         assert_eq!(search_term("Call of Duty: Black Ops II - Zombies"), "Call of Duty: Black Ops II Zombies");
     }
@@ -353,6 +533,9 @@ mod tests {
         assert!(similarity("Grand Theft Auto V", "Grand Theft Auto V Enhanced") >= 0.75);
         assert!(similarity("Hollow Knight", "Hollow Knight") > 0.99);
         assert!(similarity("debian netinst", "Grand Theft Auto V") < 0.2);
+        assert!(similarity("Big Buck", "Big Buck Hunter: Ultimate Trophy - Mythic Hunting Pack") < 0.5);
+        assert!(similarity("Big Buck Bunny", "Big Buck Backshots") < 0.6);
+        assert!(similarity("Assassin's Creed Black Flag Resynced Deluxe Edition", "Assassin's Creed Black Flag Resynced") >= 0.7);
     }
 }
 
@@ -367,11 +550,16 @@ mod network_tests {
         let root = std::env::temp_dir().join(format!("steam-transfer-covers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let covers = Covers::new(&root, ArtMap::default());
-        for name in ["Hollow.Knight.v1.5.78-[GOG]", "Stardew_Valley_1.6.15_(64bit)", "debian-13.8.0-amd64-netinst.iso"] {
+        for name in [
+            "Assassin&#039;s Creed Black Flag Resynced Deluxe Edition v1.0.6.10 + DLCs Bonuses MULTI13 [Extras, Selective Download from 34.6 GB]",
+            "Stardew_Valley_1.6.15_(64bit)",
+            "debian-13.8.0-amd64-netinst.iso",
+            "Big Buck Bunny (2008) 1080p",
+        ] {
             let mut url = None;
             for _ in 0..40 {
                 url = covers.url_for(name, None, false);
-                if url.is_some() || matches!(covers.db.lock().unwrap().entries.get(&normalize(name)), Some(Entry::Missing)) {
+                if url.is_some() || matches!(covers.db.lock().unwrap().entries.get(&normalize(name)), Some(Entry::Missing { .. })) {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));

@@ -198,7 +198,7 @@ const STICKERS = {
 const ACTIONS = {
   backup: { new: 'Back up →', resume: 'Resume →', update: 'Update →', done: 'Details' },
   move: { new: 'Move →', resume: 'Resume →' },
-  download: { fetching: 'Remove', checking: 'Pause', downloading: 'Pause', paused: 'Resume', seeding: 'Open', error: 'Remove' },
+  download: { fetching: 'Pause', checking: 'Pause', downloading: 'Pause', paused: 'Resume', seeding: 'Open', error: 'Remove' },
   restore: { new: 'Restore →', resume: 'Resume →', update: 'Update →', done: 'Details', newer: 'Details', broken: 'Unfinished' },
 };
 
@@ -651,9 +651,10 @@ function renderLocation() {
         h('button', { class: 'btn', onclick: chooseDownloadDir }, 'Change')),
       h('button', { class: 'btn violet', onclick: startDownload }, 'Download'),
       h('button', { class: 'btn ghost', onclick: openTorrentFile }, 'Open .torrent'),
+      h('button', { class: 'btn ghost', onclick: openSpeedSettings, title: 'Download and upload speed limits' }, '⚙ Speed'),
       h('div', { class: 'loc-stats' },
-        h('span', {}, '↓ ', h('b', {}, `${fmtBytes(totals.down)}/s`)),
-        h('span', {}, '↑ ', h('b', {}, `${fmtBytes(totals.up)}/s`)),
+        h('span', {}, '↓ ', h('b', {}, `${fmtBytes(totals.down)}/s`), limitText(S.settings.torrent_down_kbps)),
+        h('span', {}, '↑ ', h('b', {}, `${fmtBytes(totals.up)}/s`), limitText(S.settings.torrent_up_kbps)),
         h('span', {}, h('b', {}, totals.active), ' active')),
     );
   } else {
@@ -1106,10 +1107,10 @@ async function chooseDownloadDir() {
 
 async function torrentPrimary(t) {
   try {
-    if (t.state === 'downloading' || t.state === 'checking') await call('torrent_pause', { id: t.id });
-    else if (t.state === 'paused') await call('torrent_resume', { id: t.id });
+    if (['downloading', 'checking', 'fetching'].includes(t.state)) await call('torrent_pause', { key: t.key });
+    else if (t.state === 'paused') await call('torrent_resume', { key: t.key });
     else if (t.state === 'seeding') await call('open_folder', { path: t.folder });
-    else if (t.state === 'fetching' || t.state === 'error') return removeTorrent(t);
+    else if (t.state === 'error') return removeTorrent(t);
     await pollTorrents(true);
   } catch (e) { showError(e); }
 }
@@ -1129,7 +1130,7 @@ async function removeTorrent(t) {
 function openTorrentCase(t) {
   const facts = [];
   const add = (k, v, cls) => facts.push(h('dt', {}, k), h('dd', { class: cls || null }, v));
-  add('Status', { fetching: 'Fetching torrent info from peers', checking: 'Checking existing files', downloading: 'Downloading', paused: 'Paused', seeding: 'Finished (sharing with others while the app is open)', error: 'Error' }[t.state], t.state === 'seeding' ? 'good' : t.state === 'error' ? 'warn-text' : null);
+  add('Status', { fetching: 'Fetching torrent info from peers (you can pause this)', checking: 'Checking existing files', downloading: 'Downloading', paused: 'Paused', seeding: 'Finished (sharing with others while the app is open)', error: 'Error' }[t.state], t.state === 'seeding' ? 'good' : t.state === 'error' ? 'warn-text' : null);
   if (t.error) add('Problem', t.error, 'warn-text');
   if (t.total_bytes) add('Size', fmtBytes(t.total_bytes));
   if (t.total_bytes) add('Downloaded', `${fmtBytes(t.progress_bytes)} (${torrentPct(t).toFixed(1)}%)`);
@@ -1139,9 +1140,9 @@ function openTorrentCase(t) {
   if (t.uploaded_bytes) add('Uploaded', fmtBytes(t.uploaded_bytes));
   add('Saved to', t.folder);
   const actions = [];
-  if (t.state === 'downloading' || t.state === 'checking') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Pause'));
+  if (['downloading', 'checking', 'fetching'].includes(t.state)) actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Pause'));
   if (t.state === 'paused') actions.push(h('button', { class: 'btn violet', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Resume'));
-  if (t.state === 'seeding') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); call('torrent_pause', { id: t.id }).then(() => pollTorrents(true)).catch(showError); } }, 'Stop sharing'));
+  if (t.state === 'seeding') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); call('torrent_pause', { key: t.key }).then(() => pollTorrents(true)).catch(showError); } }, 'Stop sharing'));
   actions.push(h('button', { class: 'btn', onclick: () => call('open_folder', { path: t.folder }).catch(showError) }, 'Open folder'));
   actions.push(h('button', { class: 'btn', onclick: () => changeCover(t) }, 'Change cover…'));
   if (t.cover) actions.push(h('button', { class: 'btn', onclick: () => resetCover(t) }, 'Reset cover'));
@@ -1160,6 +1161,35 @@ function openTorrentCase(t) {
       h('div', { class: 'sub' }, 'Torrent download'),
       h('dl', { class: 'facts' }, facts),
       h('div', { class: 'actions' }, actions))), true);
+}
+
+const limitText = (kbps) => (kbps ? h('span', { class: 'limit' }, ` / max ${fmtBytes(kbps * 1024)}/s`) : null);
+
+async function openSpeedSettings() {
+  const field = (label, kbps) => {
+    const unlimited = h('input', { type: 'checkbox', checked: !kbps });
+    const amount = h('input', { type: 'number', min: '0.1', step: '0.1', value: kbps ? +(kbps / 1024).toFixed(1) : '', placeholder: 'MB/s', disabled: !kbps });
+    unlimited.addEventListener('change', () => { amount.disabled = unlimited.checked; if (!unlimited.checked) amount.focus(); });
+    const row = h('div', { class: 'speed-row' },
+      h('span', { class: 'speed-label' }, label),
+      h('label', { class: 'speed-unlimited' }, unlimited, ' No limit'),
+      h('span', { class: 'speed-amount' }, amount, ' MB/s'));
+    return { row, read: () => (unlimited.checked ? 0 : Math.max(1, Math.round((parseFloat(amount.value) || 0) * 1024))) };
+  };
+  const down = field('Download', S.settings.torrent_down_kbps || 0);
+  const up = field('Upload', S.settings.torrent_up_kbps || 0);
+  const extra = h('div', { class: 'speed-settings' }, down.row, up.row,
+    h('p', { class: 'speed-hint' }, 'Limits apply to all downloads together, straight away. Keeping some upload helps downloads stay fast.'));
+  const choice = await dialog('Download speed', '', [['Cancel', ''], ['Save', 'primary', 'save']], extra);
+  if (choice !== 'save') return;
+  const downKbps = down.read(), upKbps = up.read();
+  try {
+    await call('torrent_set_limits', { downKbps, upKbps });
+    S.settings.torrent_down_kbps = downKbps;
+    S.settings.torrent_up_kbps = upKbps;
+    renderLocation();
+    toast('Speed limits saved', `Download: ${downKbps ? fmtBytes(downKbps * 1024) + '/s' : 'no limit'} · Upload: ${upKbps ? fmtBytes(upKbps * 1024) + '/s' : 'no limit'}`, 'ok');
+  } catch (e) { showError(e); }
 }
 
 async function changeCover(t) {
