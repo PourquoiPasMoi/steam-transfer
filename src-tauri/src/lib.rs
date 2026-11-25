@@ -266,13 +266,20 @@ async fn install_update(app: AppHandle) -> CmdResult<()> {
         .ok_or("You already have the latest version.")?;
     let mut downloaded: u64 = 0;
     let progress_app = app.clone();
+    let finished_app = app.clone();
+    // On Windows the plugin launches the installer (passive mode) and exits this process;
+    // the installer reopens the app when it is done.
     update
         .download_and_install(
             move |chunk, total| {
                 downloaded += chunk as u64;
                 let _ = progress_app.emit("update-progress", (downloaded, total));
             },
-            || {},
+            move || {
+                let _ = finished_app.emit("update-installing", ());
+                // let the "installing" message show on the display before the app closes
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+            },
         )
         .await
         .map_err(|e| e.to_string())?;

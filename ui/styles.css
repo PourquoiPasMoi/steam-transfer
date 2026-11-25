@@ -89,6 +89,7 @@ button:disabled { cursor: default; }
 }
 .version:hover { color: var(--ink-dim); background: rgba(255, 255, 255, 0.05); }
 .titlebar-right { display: flex; align-items: center; gap: 10px; height: 100%; }
+.update-pill:disabled { opacity: 0.7; }
 .update-pill {
   border: 0; border-radius: 999px; padding: 4px 12px;
   background: var(--orange); color: #1b0f05; font-weight: 700; font-size: 12px;
@@ -627,6 +628,11 @@ button:disabled { cursor: default; }
     conic-gradient(from 200deg, transparent 0 10%, rgba(255, 255, 255, 0.25) 15%, transparent 22% 60%, rgba(255, 255, 255, 0.15) 66%, transparent 72%);
 }
 .tray-disc.loaded { opacity: 1; }
+.tray-disc.update-disc {
+  /* the app's own disc while it updates itself */
+  background: radial-gradient(circle, #2a6df4 0 34%, transparent 34.5%),
+    conic-gradient(from 30deg, #cfd5dc, #ff8fc0, #ffe08a, #8affd0, #8ac4ff, #c69aff, #cfd5dc);
+}
 .tray-disc.spinning { animation: spin 0.9s linear infinite; }
 
 .lcd {

@@ -58,6 +58,7 @@ const S = {
   spread: 0,
   layout: { cols: 3, rows: 2, perPage: 6, single: false },
   update: null,
+  updating: null,        // { version, done, total, phase: 'download' | 'install' } while self-updating
   loading: true,
 };
 
@@ -551,8 +552,10 @@ function progressPct(p) {
 }
 
 function renderDeck() {
+  if (S.updating) return renderUpdateDeck();
   const cur = S.queue.current;
   const tray = $('#trayDisc');
+  tray.classList.remove('update-disc');
   const p = S.progress && cur && S.progress.id === cur.id ? S.progress : null;
   $('#stopBtn').disabled = !cur;
   if (cur) {
@@ -879,7 +882,8 @@ const modalOpen = () => !$('#modalRoot').classList.contains('hidden');
 /** buttons: [[label, style, value]] - resolves with the clicked button's value (or label). */
 function dialog(title, text, buttons, extra) {
   return new Promise((resolve) => {
-    const btns = buttons.map(([label, style, value]) => h('button', { class: `btn ${style || ''}`, onclick: () => { closeModal(); resolve(value ?? label); } }, label));
+    const btns = buttons.map(([label, style, value]) => h('button', { class: `btn ${style || ''}`, onclick: () => { resolve(value ?? label); closeModal(); } }, label));
+    // resolve before closing: closing a dialog any other way (✕, Esc, backdrop) resolves it with null
     showModal(h('div', { class: 'dialog' }, h('h2', {}, title), h('p', {}, text), extra || null, h('div', { class: 'actions' }, btns)), true, () => resolve(null));
   });
 }
@@ -920,25 +924,63 @@ async function checkForUpdate(manual) {
 
 async function showUpdateDialog() {
   const u = S.update;
-  if (!u) return;
-  const bar = h('progress', { max: 100, value: 0, class: 'hidden' });
+  if (!u || S.updating) return;
+  if (S.queue.current || S.queue.pending.length) {
+    return dialog('Finish your transfers first', 'A backup or restore is still running. Update once the queue is empty so nothing is interrupted.', [['OK', 'primary']]);
+  }
   const choice = await dialog(`Version ${u.version} is ready`,
     `${u.notes || 'A new version of Steam Transfer is available.'}\n\nThe app will download it, install it and restart. Your backups and settings are not touched.`,
     [['Later', ''], ['Install & restart', 'primary', 'install']]);
   if (choice !== 'install') return;
-  showModal(h('div', { class: 'dialog' }, h('h2', {}, 'Updating…'), h('p', {}, 'Downloading the new version from GitHub.'), bar), false);
-  bar.classList.remove('hidden');
-  const off = await S.api.listen('update-progress', (e) => {
-    const [done, total] = e.payload;
-    if (total) bar.value = (done / total) * 100;
-  });
+
+  // Progress shows on the CD-player display at the bottom.
+  S.updating = { version: u.version, done: 0, total: 0, phase: 'download' };
+  const pill = $('#updatePill');
+  pill.textContent = 'Updating…';
+  pill.disabled = true;
+  renderDeck();
+  const offs = [
+    await S.api.listen('update-progress', (e) => {
+      const [done, total] = e.payload;
+      Object.assign(S.updating, { done, total: total || 0 });
+      renderDeck();
+    }),
+    await S.api.listen('update-installing', () => {
+      S.updating.phase = 'install';
+      renderDeck();
+    }),
+  ];
   try {
-    await call('install_update');
+    await call('install_update');   // on success the installer takes over and the app restarts
   } catch (e) {
-    off();
-    closeModal();
+    offs.forEach((off) => off());
+    S.updating = null;
+    pill.textContent = `Update ${u.version} available`;
+    pill.disabled = false;
+    renderDeck();
     showError(e);
   }
+}
+
+function renderUpdateDeck() {
+  const u = S.updating;
+  const tray = $('#trayDisc');
+  tray.style.backgroundImage = '';
+  tray.classList.add('loaded', 'spinning', 'update-disc');
+  $('#stopBtn').disabled = true;
+  const pct = u.phase === 'install' ? 100 : u.total ? (u.done / u.total) * 100 : 0;
+  $('#lcdTitle').textContent = `UPDATING TO V${u.version}`;
+  $('#lcdPct').textContent = u.total || u.phase === 'install' ? `${pct.toFixed(0)}%` : '';
+  $('#lcdFill').style.width = `${pct}%`;
+  if (u.phase === 'install') {
+    $('#lcdStats').textContent = 'INSTALLING  STEAM TRANSFER WILL RESTART BY ITSELF';
+  } else {
+    $('#lcdStats').textContent = u.total
+      ? `DOWNLOADING FROM GITHUB  ${fmtBytes(u.done)} / ${fmtBytes(u.total)}`
+      : 'CONNECTING TO GITHUB…';
+  }
+  $('#lcdEta').textContent = '';
+  $('#lcdFile').textContent = u.phase === 'install' ? 'Your backups and settings are not touched.' : '';
 }
 
 // ------------------------------------------------------------------------------------------ events & boot

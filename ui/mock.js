@@ -82,7 +82,17 @@
     steam_running: () => false,
     pick_folder: () => 'D:\\',
     open_folder: () => null,
-    check_update: () => null,
+    // open index.html#update to preview the self-update flow
+    check_update: () => (location.hash === '#update' ? { version: '2.0.2', notes: 'Preview of the update flow.' } : null),
+    install_update: () => new Promise(() => {
+      const total = 2.1e6;
+      let done = 0;
+      const t = setInterval(() => {
+        done = Math.min(total, done + total / 12);
+        emit('update-progress', [done, total]);
+        if (done >= total) { clearInterval(t); emit('update-installing', null); }
+      }, 250);
+    }),
     enqueue: ({ spec, title, appId }) => {
       const id = nextId++;
       queue.pending.push({ id, spec, title, app_id: appId });
