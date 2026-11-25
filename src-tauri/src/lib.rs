@@ -250,53 +250,104 @@ fn open_folder(path: String) -> CmdResult<()> {
     sys::open_in_explorer(&target).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-async fn check_update(app: AppHandle) -> CmdResult<Option<UpdateDto>> {
+/// The updater, optionally pointed at another manifest via STEAM_TRANSFER_UPDATE_URL (used for testing updates).
+fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     use tauri_plugin_updater::UpdaterExt;
-    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
-    Ok(update.map(|u| UpdateDto { version: u.version.clone(), notes: u.body.clone() }))
+    let mut builder = app.updater_builder();
+    if let Ok(url) = std::env::var("STEAM_TRANSFER_UPDATE_URL") {
+        let url = url.parse().map_err(|e| format!("Bad STEAM_TRANSFER_UPDATE_URL: {e}"))?;
+        builder = builder.endpoints(vec![url]).map_err(|e| e.to_string())?;
+    }
+    builder.build().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+async fn check_update(app: AppHandle) -> CmdResult<Option<UpdateDto>> {
+    let update = updater(&app)?.check().await.map_err(|e| e.to_string())?;
+    Ok(update.map(|u| UpdateDto { version: u.version.clone(), notes: u.body.clone() }))
+}
+
+/// Download the update, then hand over to a helper and close normally.
+///
+/// We don't use the plugin's `download_and_install`: on Windows it calls `std::process::exit`
+/// from a background thread while the window is still open, which can freeze the app halfway
+/// through exiting (and a frozen copy then makes the next launch show a black window).
+/// Instead a temporary copy of this exe waits for the app to close, runs the installer,
+/// waits for it to finish and reopens the app.
+#[tauri::command]
 async fn install_update(app: AppHandle) -> CmdResult<()> {
-    use tauri_plugin_updater::UpdaterExt;
     if app.state::<AppState>().queue.busy() {
         return Err("Wait for the transfers in the queue to finish first.".into());
     }
-    let update = app
-        .updater()
-        .map_err(|e| e.to_string())?
+    let update = updater(&app)?
         .check()
         .await
         .map_err(|e| e.to_string())?
         .ok_or("You already have the latest version.")?;
+
     let mut downloaded: u64 = 0;
     let progress_app = app.clone();
-    let finished_app = app.clone();
-    // On Windows the plugin launches the installer (passive mode) and exits this process;
-    // the installer reopens the app when it is done.
-    update
-        .download_and_install(
+    // `download` checks the file's signature against the public key built into the app.
+    let bytes = update
+        .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
                 let _ = progress_app.emit("update-progress", (downloaded, total));
             },
-            move || {
-                let _ = finished_app.emit("update-installing", ());
-                // let the "installing" message show on the display before the app closes
-                std::thread::sleep(std::time::Duration::from_millis(1200));
-            },
+            || {},
         )
         .await
-        .map_err(|e| e.to_string())?;
-    app.restart();
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    let dir = std::env::temp_dir().join("SteamTransfer-update");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let installer = dir.join(format!("Steam-Transfer_{}_x64-setup.exe", update.version));
+    std::fs::write(&installer, &bytes).map_err(|e| format!("Could not save the update: {e}"))?;
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let helper = dir.join("steam-transfer-update-helper.exe");
+    std::fs::copy(&me, &helper).map_err(|e| format!("Could not prepare the updater: {e}"))?;
+
+    let _ = app.emit("update-installing", ());
+    std::process::Command::new(&helper)
+        .arg("--apply-update")
+        .arg(std::process::id().to_string())
+        .arg(&installer)
+        .arg(&me)
+        .spawn()
+        .map_err(|e| format!("Could not start the updater: {e}"))?;
+
+    // let the "installing" message show on the display, then close the normal way
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    sys::exit_watchdog(std::time::Duration::from_secs(8));
+    app.exit(0);
+    Ok(())
+}
+
+/// Command-line modes that run instead of the app. Returns an exit code when one was handled.
+pub fn handle_cli() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--apply-update") => Some(sys::apply_update(&args[1..])),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A copy frozen while exiting would block this one from drawing its window.
+    sys::close_stuck_copies();
     tauri::Builder::default()
+        // Only one copy at a time (two queues copying to the same drive would fight);
+        // opening it again just brings the existing window to the front.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .register_asynchronous_uri_scheme_protocol("art", |ctx, request, responder| {
