@@ -1,7 +1,7 @@
 # Builds the Windows installer and publishes a GitHub Release with the signed
 # updater manifest (latest.json) that installed copies check on startup.
 #
-# Release a new version:  node scripts/bump.mjs 2.0.1 && git commit -am "v2.0.1" && git tag v2.0.1 && git push --follow-tags
+# Release a new version:  node scripts/bump.mjs 2.0.1 && git commit -am "v2.0.1" && git tag -a v2.0.1 -m v2.0.1 && git push --follow-tags
 name: Release
 
 on:

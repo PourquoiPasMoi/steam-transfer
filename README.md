@@ -53,7 +53,7 @@ src-tauri/src/
 ## Release a new version
 
 1. `node scripts/bump.mjs 2.0.1`
-2. `git commit -am "v2.0.1"`, then `git tag v2.0.1`, then `git push --follow-tags`
+2. `git commit -am "v2.0.1"`, then `git tag -a v2.0.1 -m v2.0.1`, then `git push --follow-tags`
 
 The **Release** workflow builds the installer, signs the update and publishes the GitHub Release
 with `latest.json`. Installed copies pick it up the next time they start.

@@ -12,4 +12,4 @@ edit('package.json', (s) => s.replace(/"version": "[^"]+"/, `"version": "${versi
 edit('src-tauri/tauri.conf.json', (s) => s.replace(/"version": "[^"]+"/, `"version": "${version}"`));
 edit('src-tauri/Cargo.toml', (s) => s.replace(/^version = "[^"]+"/m, `version = "${version}"`));
 edit('ui/index.html', (s) => s.replace(/>v\d+\.\d+\.\d+</, `>v${version}<`));
-console.log(`Version set to ${version}. Now: git commit -am "v${version}" && git tag v${version} && git push --follow-tags`);
+console.log(`Version set to ${version}. Now: git commit -am "v${version}" && git tag -a v${version} -m v${version} && git push --follow-tags`);
