@@ -50,6 +50,7 @@ const S = {
   pkgByApp: {},
   restore: { binder: null, library: null, installed: {}, libraries: [], binders: [], loaded: false },
   move: { from: null, to: null, installed: {}, libraries: [] },
+  dl: { list: [], dir: null, link: '', signature: '' },
   steamRunning: false,
   queue: { current: null, pending: [] },
   progress: null,
@@ -143,12 +144,25 @@ function moveItems() {
   });
 }
 
+const TORRENT_ACTIVE = ['fetching', 'checking', 'downloading'];
+
+function downloadItems() {
+  return S.dl.list.map((t) => ({
+    key: `d-${t.key}`, app_id: null, name: t.name, size: t.total_bytes, art: null, state: t.state, torrent: t,
+  }));
+}
+
 const FILTERS = {
   backup: [
     ['all', 'All', () => true],
     ['new', 'Not backed up', (i) => i.state === 'new'],
     ['done', 'Backed up', (i) => i.state === 'done'],
     ['attention', 'Needs update', (i) => i.state === 'update' || i.state === 'resume'],
+  ],
+  download: [
+    ['all', 'All', () => true],
+    ['active', 'Downloading', (i) => TORRENT_ACTIVE.includes(i.state) || i.state === 'paused'],
+    ['done', 'Done', (i) => i.state === 'seeding'],
   ],
   move: [
     ['all', 'All', () => true],
@@ -163,7 +177,7 @@ const FILTERS = {
 };
 
 function allItems() {
-  return S.mode === 'backup' ? backupItems() : S.mode === 'restore' ? restoreItems() : moveItems();
+  return { backup: backupItems, restore: restoreItems, move: moveItems, download: downloadItems }[S.mode]();
 }
 
 function visibleItems() {
@@ -175,15 +189,21 @@ function visibleItems() {
 const STICKERS = {
   backup: { done: ['BACKED UP ✓', 'done'], update: ['UPDATE', 'update'], resume: ['UNFINISHED', 'resume'] },
   move: { resume: ['UNFINISHED', 'resume'] },
+  download: {
+    fetching: ['FETCHING INFO', 'queued'], checking: ['CHECKING', 'resume'], downloading: ['DOWNLOADING', 'busy'],
+    paused: ['PAUSED', 'muted'], seeding: ['DONE ✓', 'done'], error: ['ERROR', 'error'],
+  },
   restore: { done: ['INSTALLED ✓', 'done'], update: ['UPDATE', 'update'], resume: ['UNFINISHED', 'resume'], newer: ['PC NEWER', 'muted'], broken: ['INCOMPLETE', 'muted'] },
 };
 const ACTIONS = {
   backup: { new: 'Back up →', resume: 'Resume →', update: 'Update →', done: 'Details' },
   move: { new: 'Move →', resume: 'Resume →' },
+  download: { fetching: 'Remove', checking: 'Pause', downloading: 'Pause', paused: 'Resume', seeding: 'Open', error: 'Remove' },
   restore: { new: 'Restore →', resume: 'Resume →', update: 'Update →', done: 'Details', newer: 'Details', broken: 'Unfinished' },
 };
 
 function stickerFor(item) {
+  if (item.torrent) return STICKERS.download[item.state] || null;
   if (item.state === 'busy') {
     const verb = { verify: 'CHECKING', restore: 'RESTORING', move: 'MOVING' }[item.job.kind] || 'COPYING';
     return [verb, 'busy'];
@@ -195,6 +215,9 @@ function stickerFor(item) {
 // ------------------------------------------------------------------------------------------ disc art
 
 function discEl(item, cls = 'disc') {
+  if (item.torrent) {
+    return h('div', { class: `${cls} blank` }, h('div', { class: 'initials dark' }, initials(item.name) || '♪'));
+  }
   const disc = h('div', { class: cls });
   const sources = [item.art, cdn(item.app_id, 'library_600x900.jpg'), cdn(item.app_id, 'header.jpg')].filter(Boolean);
   const img = h('img', { alt: '', draggable: 'false', loading: 'lazy', decoding: 'async' });
@@ -449,6 +472,8 @@ function emptyState(items) {
   if (S.loading) return h('div', { class: 'page-empty' }, h('div', { class: 'note' }, h('h3', {}, 'Flipping through your library…'), h('p', {}, 'Looking for Steam and your games.')));
   if (S.mode === 'backup') {
     if (!S.games.length) return note('No Steam games found', 'Steam Transfer couldn\'t find any installed Steam games on this PC. If Steam is installed somewhere unusual, start Steam once and press Refresh.', [h('button', { class: 'btn primary', onclick: refreshAll }, 'Refresh')]);
+  } else if (S.mode === 'download') {
+    if (!S.dl.list.length) return note('Paste a magnet link', 'Paste a magnet link in the box above (or open a .torrent file), pick where to save it and press Download. Progress, speed and peers show up here, and unfinished downloads carry on when you reopen the app.', []);
   } else if (S.mode === 'move') {
     if (S.move.libraries.length < 2) return note('You need a second Steam library', 'Moving works between Steam libraries on this PC. In Steam open Settings > Storage, use "Add Drive" to pick the other drive, then press Refresh here.', [h('button', { class: 'btn', onclick: refreshMove }, 'Refresh')]);
     if (!items.length && !S.search && S.filter === 'all') return note('No games in this library', 'Pick another library in the From list.', []);
@@ -464,7 +489,45 @@ function note(title, text, actions = []) {
   return h('div', { class: 'page-empty' }, h('div', { class: 'note' }, h('h3', {}, title), h('p', {}, text), h('div', { class: 'actions' }, actions)));
 }
 
+function torrentPct(t) {
+  return t.total_bytes ? Math.min(100, (t.progress_bytes / t.total_bytes) * 100) : 0;
+}
+
+function torrentMeta(t) {
+  if (t.state === 'downloading') return `${torrentPct(t).toFixed(0)}% · ${fmtBytes(t.down_bps)}/s`;
+  if (t.state === 'fetching') return 'finding peers…';
+  if (t.state === 'checking') return `checking ${torrentPct(t).toFixed(0)}%`;
+  if (t.state === 'paused') return `${torrentPct(t).toFixed(0)}% · paused`;
+  if (t.state === 'error') return 'failed';
+  return fmtBytes(t.total_bytes);
+}
+
+function torrentSleeveEl(item, i) {
+  const t = item.torrent;
+  const sticker = stickerFor(item);
+  const showRing = t.state !== 'seeding' && t.state !== 'fetching';
+  const pocket = h('div', { class: 'pocket' },
+    showRing ? h('div', { class: 'ring', style: `--p:${torrentPct(t)}; --ring-color: ${t.state === 'paused' ? 'var(--grey)' : 'var(--violet)'}` }) : null,
+    discEl(item));
+  const action = h('button', {
+    class: 'strip-action download',
+    onclick: (e) => { e.stopPropagation(); torrentPrimary(t); },
+  }, ACTIONS.download[t.state] || 'Details');
+  return h('div', {
+    class: `sleeve ${t.state === 'downloading' || t.state === 'fetching' ? 'busy' : ''} ${t.state === 'error' ? 'dim' : ''}`,
+    role: 'button', tabindex: '0', style: `--i:${i}`, dataset: { key: item.key }, title: t.name,
+    onclick: () => openTorrentCase(t),
+    onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTorrentCase(t); } },
+  },
+    pocket,
+    sticker ? h('div', { class: `sticker ${sticker[1]}` }, sticker[0]) : null,
+    h('div', { class: 'strip' },
+      h('div', { class: 'strip-title' }, t.name),
+      h('div', { class: 'strip-meta' }, h('span', { class: 'meta-text' }, torrentMeta(t)), action)));
+}
+
 function sleeveEl(item, i) {
+  if (item.torrent) return torrentSleeveEl(item, i);
   const pct = item.state === 'busy' && S.progress && S.progress.id === item.job.id ? progressPct(S.progress) : 0;
   const sticker = stickerFor(item);
   const pocket = h('div', { class: 'pocket' },
@@ -568,6 +631,25 @@ function renderLocation() {
         h('span', {}, h('b', {}, items.length), ' discs'),
         h('span', {}, h('b', {}, items.filter((i) => i.state === 'done' || i.state === 'newer').length), ' installed')),
     );
+  } else if (S.mode === 'download') {
+    const input = h('input', {
+      class: 'magnet', type: 'text', placeholder: 'Paste a magnet link…', spellcheck: 'false', value: S.dl.link,
+      oninput: (e) => { S.dl.link = e.target.value; },
+      onkeydown: (e) => { if (e.key === 'Enter') startDownload(); },
+    });
+    const totals = S.dl.list.reduce((a, t) => ({ down: a.down + t.down_bps, up: a.up + t.up_bps, active: a.active + (TORRENT_ACTIVE.includes(t.state) ? 1 : 0) }), { down: 0, up: 0, active: 0 });
+    appendAll(loc,
+      h('label', { class: 'magnet-wrap' }, h('span', { class: 'magnet-icon', 'aria-hidden': 'true' }, '🧲'), input),
+      h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Save to'),
+        driveEl(S.dl.dir || '…', null, false),
+        h('button', { class: 'btn', onclick: chooseDownloadDir }, 'Change')),
+      h('button', { class: 'btn violet', onclick: startDownload }, 'Download'),
+      h('button', { class: 'btn ghost', onclick: openTorrentFile }, 'Open .torrent'),
+      h('div', { class: 'loc-stats' },
+        h('span', {}, '↓ ', h('b', {}, `${fmtBytes(totals.down)}/s`)),
+        h('span', {}, '↑ ', h('b', {}, `${fmtBytes(totals.up)}/s`)),
+        h('span', {}, h('b', {}, totals.active), ' active')),
+    );
   } else {
     const m = S.move;
     const libs = m.libraries;
@@ -620,7 +702,7 @@ function renderDeck() {
   if (S.updating) return renderUpdateDeck();
   const cur = S.queue.current;
   const tray = $('#trayDisc');
-  tray.classList.remove('update-disc');
+  tray.classList.remove('update-disc', 'cdr-disc');
   const p = S.progress && cur && S.progress.id === cur.id ? S.progress : null;
   $('#stopBtn').disabled = !cur;
   if (cur) {
@@ -646,6 +728,22 @@ function renderDeck() {
   } else {
     tray.classList.remove('spinning');
     const last = S.lastResult;
+    const activeTorrents = S.dl.list.filter((t) => t.state === 'downloading');
+    if (activeTorrents.length && !(last && Date.now() - last.at < 8000)) {
+      const top = activeTorrents.slice().sort((a, b) => b.down_bps - a.down_bps)[0];
+      const down = activeTorrents.reduce((a, t) => a + t.down_bps, 0);
+      const up = S.dl.list.reduce((a, t) => a + t.up_bps, 0);
+      tray.style.backgroundImage = '';
+      tray.classList.add('loaded', 'spinning', 'cdr-disc');
+      $('#lcdTitle').textContent = activeTorrents.length > 1 ? `DOWNLOADING ${activeTorrents.length} TORRENTS` : `DOWNLOADING  ${top.name}`;
+      $('#lcdPct').textContent = `${torrentPct(top).toFixed(1)}%`;
+      $('#lcdFill').style.width = `${torrentPct(top)}%`;
+      $('#lcdStats').textContent = `↓ ${fmtBytes(down)}/S  ↑ ${fmtBytes(up)}/S  ${top.peers} PEERS  ${fmtBytes(top.progress_bytes)} / ${fmtBytes(top.total_bytes)}`;
+      $('#lcdEta').textContent = top.eta_secs ? `ETA ${fmtEta(top.eta_secs)}` : '';
+      $('#lcdFile').textContent = activeTorrents.length > 1 ? top.name : '';
+      return renderQueueList();
+    }
+    tray.classList.remove('cdr-disc');
     if (last && Date.now() - last.at < 60000) {
       tray.style.backgroundImage = artSources({ app_id: last.app_id, art: artFor(last.app_id) }).map((s) => `url("${s}")`).join(', ');
       tray.classList.add('loaded');
@@ -659,12 +757,16 @@ function renderDeck() {
       $('#lcdTitle').textContent = 'READY';
       $('#lcdPct').textContent = '';
       $('#lcdFill').style.width = '0%';
-      $('#lcdStats').textContent = { backup: 'PICK A GAME TO BACK IT UP', restore: 'PICK A DISC TO RESTORE IT', move: 'PICK A GAME TO MOVE IT' }[S.mode];
+      $('#lcdStats').textContent = { backup: 'PICK A GAME TO BACK IT UP', restore: 'PICK A DISC TO RESTORE IT', move: 'PICK A GAME TO MOVE IT', download: 'PASTE A MAGNET LINK TO START' }[S.mode];
     }
     $('#lcdEta').textContent = '';
     $('#lcdFile').textContent = '';
   }
 
+  renderQueueList();
+}
+
+function renderQueueList() {
   const list = $('#queueList');
   list.replaceChildren();
   if (!S.queue.pending.length) list.append(h('span', { class: 'queue-empty' }, 'nothing queued'));
@@ -961,6 +1063,125 @@ async function refreshRestore() {
   renderAll();
 }
 
+// ---- torrents
+
+async function startDownload() {
+  const link = (S.dl.link || '').trim();
+  if (!link) return toast('Paste a magnet link first', 'Copy a magnet link (it starts with magnet:?) and paste it into the box.', '');
+  if (!S.dl.dir) return chooseDownloadDir();
+  try {
+    await call('torrent_add', { link, folder: S.dl.dir });
+    S.dl.link = '';
+    S.filter = 'all';
+    await pollTorrents(true);
+  } catch (e) { showError(e); }
+}
+
+async function openTorrentFile() {
+  const path = await call('pick_torrent_file').catch(showError);
+  if (!path) return;
+  if (!S.dl.dir) await chooseDownloadDir();
+  if (!S.dl.dir) return;
+  try {
+    await call('torrent_add_file', { path, folder: S.dl.dir });
+    await pollTorrents(true);
+  } catch (e) { showError(e); }
+}
+
+async function chooseDownloadDir() {
+  const picked = await call('pick_folder', { title: 'Where should downloads be saved?', start: S.dl.dir }).catch(showError);
+  if (!picked) return;
+  S.dl.dir = picked;
+  S.settings.download_dir = picked;
+  saveSettings();
+  renderLocation();
+}
+
+async function torrentPrimary(t) {
+  try {
+    if (t.state === 'downloading' || t.state === 'checking') await call('torrent_pause', { id: t.id });
+    else if (t.state === 'paused') await call('torrent_resume', { id: t.id });
+    else if (t.state === 'seeding') await call('open_folder', { path: t.folder });
+    else if (t.state === 'fetching' || t.state === 'error') return removeTorrent(t);
+    await pollTorrents(true);
+  } catch (e) { showError(e); }
+}
+
+async function removeTorrent(t) {
+  const hasFiles = t.id != null && t.progress_bytes > 0;
+  const choice = hasFiles
+    ? await dialog(`Remove ${t.name}?`, 'Keep the downloaded files, or delete them from your disk too?', [['Cancel', ''], ['Delete files too', 'danger', 'delete'], ['Remove, keep files', 'primary', 'keep']])
+    : 'keep';
+  if (choice !== 'keep' && choice !== 'delete') return;
+  try {
+    await call('torrent_remove', { key: t.key, deleteFiles: choice === 'delete' });
+    await pollTorrents(true);
+  } catch (e) { showError(e); }
+}
+
+function openTorrentCase(t) {
+  const facts = [];
+  const add = (k, v, cls) => facts.push(h('dt', {}, k), h('dd', { class: cls || null }, v));
+  add('Status', { fetching: 'Fetching torrent info from peers', checking: 'Checking existing files', downloading: 'Downloading', paused: 'Paused', seeding: 'Finished (sharing with others while the app is open)', error: 'Error' }[t.state], t.state === 'seeding' ? 'good' : t.state === 'error' ? 'warn-text' : null);
+  if (t.error) add('Problem', t.error, 'warn-text');
+  if (t.total_bytes) add('Size', fmtBytes(t.total_bytes));
+  if (t.total_bytes) add('Downloaded', `${fmtBytes(t.progress_bytes)} (${torrentPct(t).toFixed(1)}%)`);
+  if (t.state === 'downloading') add('Speed', `↓ ${fmtBytes(t.down_bps)}/s   ↑ ${fmtBytes(t.up_bps)}/s`);
+  if (t.state === 'downloading' && t.eta_secs) add('Time left', fmtEta(t.eta_secs));
+  if (t.id != null) add('Peers', `${t.peers} connected (${t.seeders} seeders)`);
+  if (t.uploaded_bytes) add('Uploaded', fmtBytes(t.uploaded_bytes));
+  add('Saved to', t.folder);
+  const actions = [];
+  if (t.state === 'downloading' || t.state === 'checking') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Pause'));
+  if (t.state === 'paused') actions.push(h('button', { class: 'btn violet', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Resume'));
+  if (t.state === 'seeding') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); call('torrent_pause', { id: t.id }).then(() => pollTorrents(true)).catch(showError); } }, 'Stop sharing'));
+  actions.push(h('button', { class: 'btn', onclick: () => call('open_folder', { path: t.folder }).catch(showError) }, 'Open folder'));
+  actions.push(h('button', { class: 'btn danger', onclick: () => { closeModal(); removeTorrent(t); } }, 'Remove'));
+  const front = h('div', { class: 'case-front cdr-case' }, h('div', { class: 'cdr-big' }, h('div', { class: 'initials dark' }, initials(t.name) || '♪')));
+  showModal(h('div', { class: 'case' }, front,
+    h('div', { class: 'liner' },
+      h('h2', {}, t.name),
+      h('div', { class: 'sub' }, 'Torrent download'),
+      h('dl', { class: 'facts' }, facts),
+      h('div', { class: 'actions' }, actions))), true);
+}
+
+let torrentTimer = null;
+async function pollTorrents(force) {
+  let list;
+  try { list = await call('torrent_list'); } catch { return; }
+  const signature = list.map((t) => `${t.key}:${t.state}:${t.name}`).join('|');
+  const changed = signature !== S.dl.signature;
+  S.dl.list = list;
+  S.dl.signature = signature;
+  if (S.mode === 'download') {
+    if (changed || force) renderAll();
+    else updateTorrentSleeves();
+  }
+  if (!S.queue.current && !S.updating) renderDeck();
+}
+
+/** Update rings and labels in place every second instead of rebuilding the pages. */
+function updateTorrentSleeves() {
+  for (const t of S.dl.list) {
+    const el = document.querySelector(`.sleeve[data-key="${CSS.escape(`d-${t.key}`)}"]`);
+    if (!el) continue;
+    el.querySelector('.ring')?.style.setProperty('--p', torrentPct(t));
+    const meta = el.querySelector('.meta-text');
+    if (meta) meta.textContent = torrentMeta(t);
+  }
+  renderLocation();
+}
+
+function startTorrentPolling() {
+  clearInterval(torrentTimer);
+  torrentTimer = setInterval(() => {
+    // poll every second while the tab is open or something is moving; otherwise every 5 s
+    const busy = S.dl.list.some((t) => TORRENT_ACTIVE.includes(t.state));
+    if (S.mode === 'download' || busy || Date.now() % 5000 < 1000) pollTorrents(false);
+  }, 1000);
+}
+
 async function refreshMove() {
   const m = S.move;
   const libs = await call('list_libraries').catch(() => []);
@@ -1005,6 +1226,10 @@ async function setMode(mode) {
   renderAll();
   if (mode === 'restore') await refreshRestore();
   if (mode === 'move') await refreshMove();
+  if (mode === 'download') {
+    if (!S.dl.dir) S.dl.dir = S.settings.download_dir || await call('torrent_default_dir').catch(() => null);
+    await pollTorrents(true);
+  }
 }
 
 // ------------------------------------------------------------------------------------------ modal, dialog, toast
@@ -1170,8 +1395,14 @@ function bindUi() {
     $('#winMax').addEventListener('click', () => win.toggleMaximize());
     $('#winClose').addEventListener('click', () => win.close());
     win.onCloseRequested?.(async (event) => {
-      if (!S.queue.current && !S.queue.pending.length) return;
+      const downloading = S.dl.list.some((t) => TORRENT_ACTIVE.includes(t.state));
+      if (!S.queue.current && !S.queue.pending.length && !downloading) return;
       event.preventDefault();
+      if (!S.queue.current && !S.queue.pending.length) {
+        const c = await dialog('Downloads are still running', 'Torrent downloads pause while Steam Transfer is closed and carry on the next time you open it.', [['Keep open', ''], ['Close anyway', 'danger', 'quit']]);
+        if (c === 'quit') win.destroy();
+        return;
+      }
       const choice = await dialog('Stop the transfer and quit?', 'A transfer is still running. Everything copied so far is kept and you can resume it next time.', [['Keep running', ''], ['Stop & quit', 'danger', 'quit']]);
       if (choice !== 'quit') return;
       for (const j of S.queue.pending) await call('cancel_job', { id: j.id });
@@ -1240,6 +1471,7 @@ async function main() {
     if (running !== S.steamRunning) { S.steamRunning = running; renderLocation(); }
   }, 4000);
   setInterval(() => { if (!S.queue.current && S.lastResult) renderDeck(); }, 15000);
+  startTorrentPolling();
 
   if (S.settings.auto_update_check !== false) setTimeout(() => checkForUpdate(false), 2500);
 }

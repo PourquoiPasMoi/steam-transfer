@@ -16,6 +16,8 @@ pub struct Settings {
     /// Last libraries used on the Move tab.
     pub move_from: Option<String>,
     pub move_to: Option<String>,
+    /// Where torrent downloads are saved.
+    pub download_dir: Option<String>,
     /// Check GitHub for a new version at startup.
     pub auto_update_check: Option<bool>,
 }

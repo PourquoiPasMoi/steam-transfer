@@ -4,6 +4,7 @@ mod package;
 mod settings;
 mod steam;
 mod sys;
+mod torrent;
 mod vdf;
 
 use jobs::{JobSpec, Queue, QueueSnapshot};
@@ -19,6 +20,7 @@ pub struct AppState {
     /// Art key ("lib-<id>" / "pkg-<id>") -> image file, served at http://art.localhost/<key>
     art: Mutex<HashMap<String, PathBuf>>,
     settings: Mutex<Settings>,
+    torrents: Arc<torrent::Torrents>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -250,6 +252,68 @@ fn open_folder(path: String) -> CmdResult<()> {
     sys::open_in_explorer(&target).map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------------------------
+// Torrents
+
+#[tauri::command]
+fn torrent_default_dir(state: tauri::State<'_, AppState>) -> String {
+    state.torrents.default_dir().to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+fn torrent_add(state: tauri::State<'_, AppState>, link: String, folder: String) -> CmdResult<String> {
+    state.torrents.add(torrent::Source::Link(link.trim().to_string()), PathBuf::from(folder))
+}
+
+#[tauri::command]
+async fn pick_torrent_file(app: AppHandle) -> CmdResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    Ok(app
+        .dialog()
+        .file()
+        .set_title("Open a .torrent file")
+        .add_filter("Torrent files", &["torrent"])
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn torrent_add_file(state: tauri::State<'_, AppState>, path: String, folder: String) -> CmdResult<String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("Could not read the torrent file: {e}"))?;
+    state.torrents.add(torrent::Source::File(bytes), PathBuf::from(folder))
+}
+
+#[tauri::command]
+async fn torrent_list(app: AppHandle) -> CmdResult<Vec<torrent::TorrentDto>> {
+    let torrents = app.state::<AppState>().torrents.clone();
+    Ok(torrents.list().await)
+}
+
+#[tauri::command]
+async fn torrent_pause(app: AppHandle, id: usize) -> CmdResult<()> {
+    let torrents = app.state::<AppState>().torrents.clone();
+    torrents.pause(id).await
+}
+
+#[tauri::command]
+async fn torrent_resume(app: AppHandle, id: usize) -> CmdResult<()> {
+    let torrents = app.state::<AppState>().torrents.clone();
+    torrents.resume(id).await
+}
+
+#[tauri::command]
+async fn torrent_remove(app: AppHandle, key: String, delete_files: bool) -> CmdResult<()> {
+    let torrents = app.state::<AppState>().torrents.clone();
+    torrents.remove(&key, delete_files).await
+}
+
+#[tauri::command]
+async fn torrent_downloading(app: AppHandle) -> CmdResult<bool> {
+    let torrents = app.state::<AppState>().torrents.clone();
+    Ok(torrents.downloading().await)
+}
+
 /// The updater, optionally pointed at another manifest via STEAM_TRANSFER_UPDATE_URL (used for testing updates).
 fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     use tauri_plugin_updater::UpdaterExt;
@@ -371,7 +435,18 @@ pub fn run() {
         .setup(|app| {
             let queue = Queue::new();
             queue.start_worker(app.handle().clone());
-            app.manage(AppState { queue, art: Mutex::new(HashMap::new()), settings: Mutex::new(settings::load(app.handle())) });
+            let settings = settings::load(app.handle());
+            let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("SteamTransfer"));
+            let downloads = app.path().download_dir().unwrap_or_else(|_| data_dir.join("Downloads"));
+            let torrents = torrent::Torrents::new(data_dir, downloads);
+            // Resume unfinished downloads from last time in the background.
+            if torrents.has_saved_session() {
+                let t = torrents.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = t.session().await;
+                });
+            }
+            app.manage(AppState { queue, art: Mutex::new(HashMap::new()), settings: Mutex::new(settings), torrents });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -392,6 +467,15 @@ pub fn run() {
             open_folder,
             check_update,
             install_update,
+            torrent_default_dir,
+            torrent_add,
+            pick_torrent_file,
+            torrent_add_file,
+            torrent_list,
+            torrent_pause,
+            torrent_resume,
+            torrent_remove,
+            torrent_downloading,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Steam Transfer");

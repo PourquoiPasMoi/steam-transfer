@@ -79,7 +79,34 @@
     setTimeout(startNext, 300);
   }
 
+  // sample torrents for the Download tab
+  let tNext = 10;
+  const T = (key, name, state, total, done, down) => ({ key, id: Number(key.slice(1)), name, state, total_bytes: total, progress_bytes: done, uploaded_bytes: 0, down_bps: down, up_bps: down ? 180e3 : 0, eta_secs: down ? (total - done) / down : null, peers: down ? 23 : 0, seeders: down ? 9 : 0, error: null, folder: 'C:\\Users\\You\\Downloads' });
+  const torrents = [
+    T('t1', 'debian-13.2.0-amd64-netinst.iso', 'downloading', 754e6, 301e6, 6.4e6),
+    T('t2', 'Big Buck Bunny (open movie)', 'seeding', 276e6, 276e6, 0),
+    T('t3', 'Sintel 4K', 'paused', 4.1e9, 1.2e9, 0),
+  ];
+  setInterval(() => {
+    for (const t of torrents) {
+      if (t.state === 'downloading') {
+        t.progress_bytes = Math.min(t.total_bytes, t.progress_bytes + t.down_bps);
+        t.eta_secs = (t.total_bytes - t.progress_bytes) / t.down_bps;
+        if (t.progress_bytes >= t.total_bytes) { t.state = 'seeding'; t.down_bps = 0; }
+      }
+      if (t.state === 'fetching' && Math.random() < 0.3) { t.state = 'downloading'; t.total_bytes = 1.5e9; t.down_bps = 4.2e6; t.peers = 12; t.seeders = 4; t.id = Number(t.key.slice(1)); }
+    }
+  }, 1000);
+
   const handlers = {
+    torrent_default_dir: () => 'C:\\Users\\You\\Downloads',
+    torrent_list: () => JSON.parse(JSON.stringify(torrents)),
+    torrent_add: ({ link }) => { const key = `t${tNext++}`; const n = /dn=([^&]+)/.exec(link); torrents.push({ ...T(key, n ? decodeURIComponent(n[1].replace(/\+/g, ' ')) : 'Fetching torrent info…', 'fetching', 0, 0, 0), id: null }); return key; },
+    pick_torrent_file: () => null,
+    torrent_pause: ({ id }) => { const t = torrents.find((x) => x.id === id); t.state = 'paused'; t.down_bps = 0; t.up_bps = 0; },
+    torrent_resume: ({ id }) => { const t = torrents.find((x) => x.id === id); t.state = 'downloading'; t.down_bps = 5.1e6; t.peers = 18; },
+    torrent_remove: ({ key }) => { const i = torrents.findIndex((x) => x.key === key); if (i >= 0) torrents.splice(i, 1); },
+    torrent_downloading: () => torrents.some((t) => t.state === 'downloading'),
     app_version: () => '2.0.0',
     get_settings: () => ({ destination: 'D:\\' }),
     save_settings: () => null,
