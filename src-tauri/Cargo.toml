@@ -1,6 +1,6 @@
 [package]
 name = "steam-transfer"
-version = "2.2.0"
+version = "2.3.0"
 description = "Back up Steam games to an external drive and restore them on another PC."
 edition = "2021"
 rust-version = "1.77"
