@@ -1,3 +1,4 @@
+mod covers;
 mod engine;
 mod jobs;
 mod package;
@@ -18,9 +19,10 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct AppState {
     queue: Arc<Queue>,
     /// Art key ("lib-<id>" / "pkg-<id>") -> image file, served at http://art.localhost/<key>
-    art: Mutex<HashMap<String, PathBuf>>,
+    art: covers::ArtMap,
     settings: Mutex<Settings>,
     torrents: Arc<torrent::Torrents>,
+    covers: Arc<covers::Covers>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -309,6 +311,29 @@ async fn torrent_remove(app: AppHandle, key: String, delete_files: bool) -> CmdR
 }
 
 #[tauri::command]
+async fn pick_cover_image(app: AppHandle) -> CmdResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+    Ok(app
+        .dialog()
+        .file()
+        .set_title("Choose a cover picture")
+        .add_filter("Pictures", &["jpg", "jpeg", "png", "webp"])
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn torrent_set_cover(state: tauri::State<'_, AppState>, name: String, path: String) -> CmdResult<()> {
+    state.covers.set_custom(&name, Path::new(&path))
+}
+
+#[tauri::command]
+fn torrent_reset_cover(state: tauri::State<'_, AppState>, name: String) {
+    state.covers.reset(&name);
+}
+
+#[tauri::command]
 async fn torrent_downloading(app: AppHandle) -> CmdResult<bool> {
     let torrents = app.state::<AppState>().torrents.clone();
     Ok(torrents.downloading().await)
@@ -438,7 +463,9 @@ pub fn run() {
             let settings = settings::load(app.handle());
             let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("SteamTransfer"));
             let downloads = app.path().download_dir().unwrap_or_else(|_| data_dir.join("Downloads"));
-            let torrents = torrent::Torrents::new(data_dir, downloads);
+            let art: covers::ArtMap = Default::default();
+            let covers = covers::Covers::new(&data_dir, art.clone());
+            let torrents = torrent::Torrents::new(data_dir, downloads, covers.clone());
             // Resume unfinished downloads from last time in the background.
             if torrents.has_saved_session() {
                 let t = torrents.clone();
@@ -446,7 +473,7 @@ pub fn run() {
                     let _ = t.session().await;
                 });
             }
-            app.manage(AppState { queue, art: Mutex::new(HashMap::new()), settings: Mutex::new(settings), torrents });
+            app.manage(AppState { queue, art, settings: Mutex::new(settings), torrents, covers });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -476,6 +503,9 @@ pub fn run() {
             torrent_resume,
             torrent_remove,
             torrent_downloading,
+            pick_cover_image,
+            torrent_set_cover,
+            torrent_reset_cover,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Steam Transfer");

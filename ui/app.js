@@ -216,7 +216,13 @@ function stickerFor(item) {
 
 function discEl(item, cls = 'disc') {
   if (item.torrent) {
-    return h('div', { class: `${cls} blank` }, h('div', { class: 'initials dark' }, initials(item.name) || '♪'));
+    const blank = () => h('div', { class: `${cls} blank` }, h('div', { class: 'initials dark' }, initials(item.name) || '♪'));
+    if (!item.torrent.cover) return blank();
+    const disc = h('div', { class: cls });
+    const img = h('img', { alt: '', draggable: 'false', decoding: 'async', src: item.torrent.cover });
+    img.onerror = () => disc.replaceWith(blank());
+    disc.append(img);
+    return disc;
   }
   const disc = h('div', { class: cls });
   const sources = [item.art, cdn(item.app_id, 'library_600x900.jpg'), cdn(item.app_id, 'header.jpg')].filter(Boolean);
@@ -733,8 +739,9 @@ function renderDeck() {
       const top = activeTorrents.slice().sort((a, b) => b.down_bps - a.down_bps)[0];
       const down = activeTorrents.reduce((a, t) => a + t.down_bps, 0);
       const up = S.dl.list.reduce((a, t) => a + t.up_bps, 0);
-      tray.style.backgroundImage = '';
-      tray.classList.add('loaded', 'spinning', 'cdr-disc');
+      tray.style.backgroundImage = top.cover ? `url("${top.cover}")` : '';
+      tray.classList.add('loaded', 'spinning');
+      tray.classList.toggle('cdr-disc', !top.cover);
       $('#lcdTitle').textContent = activeTorrents.length > 1 ? `DOWNLOADING ${activeTorrents.length} TORRENTS` : `DOWNLOADING  ${top.name}`;
       $('#lcdPct').textContent = `${torrentPct(top).toFixed(1)}%`;
       $('#lcdFill').style.width = `${torrentPct(top)}%`;
@@ -1136,8 +1143,17 @@ function openTorrentCase(t) {
   if (t.state === 'paused') actions.push(h('button', { class: 'btn violet', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Resume'));
   if (t.state === 'seeding') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); call('torrent_pause', { id: t.id }).then(() => pollTorrents(true)).catch(showError); } }, 'Stop sharing'));
   actions.push(h('button', { class: 'btn', onclick: () => call('open_folder', { path: t.folder }).catch(showError) }, 'Open folder'));
+  actions.push(h('button', { class: 'btn', onclick: () => changeCover(t) }, 'Change cover…'));
+  if (t.cover) actions.push(h('button', { class: 'btn', onclick: () => resetCover(t) }, 'Reset cover'));
   actions.push(h('button', { class: 'btn danger', onclick: () => { closeModal(); removeTorrent(t); } }, 'Remove'));
-  const front = h('div', { class: 'case-front cdr-case' }, h('div', { class: 'cdr-big' }, h('div', { class: 'initials dark' }, initials(t.name) || '♪')));
+  const cdr = () => h('div', { class: 'case-front cdr-case' }, h('div', { class: 'cdr-big' }, h('div', { class: 'initials dark' }, initials(t.name) || '♪')));
+  let front = cdr();
+  if (t.cover) {
+    front = h('div', { class: 'case-front' });
+    const img = h('img', { alt: '', src: t.cover });
+    img.onerror = () => front.replaceWith(cdr());
+    front.append(img);
+  }
   showModal(h('div', { class: 'case' }, front,
     h('div', { class: 'liner' },
       h('h2', {}, t.name),
@@ -1146,11 +1162,30 @@ function openTorrentCase(t) {
       h('div', { class: 'actions' }, actions))), true);
 }
 
+async function changeCover(t) {
+  const path = await call('pick_cover_image').catch(showError);
+  if (!path) return;
+  try {
+    await call('torrent_set_cover', { name: t.name, path });
+    closeModal();
+    await pollTorrents(true);
+    const updated = S.dl.list.find((x) => x.key === t.key);
+    if (updated) openTorrentCase(updated);
+  } catch (e) { showError(e); }
+}
+
+async function resetCover(t) {
+  await call('torrent_reset_cover', { name: t.name }).catch(showError);
+  closeModal();
+  toast('Cover reset', 'Looking for a new cover…', '');
+  await pollTorrents(true);
+}
+
 let torrentTimer = null;
 async function pollTorrents(force) {
   let list;
   try { list = await call('torrent_list'); } catch { return; }
-  const signature = list.map((t) => `${t.key}:${t.state}:${t.name}`).join('|');
+  const signature = list.map((t) => `${t.key}:${t.state}:${t.name}:${t.cover || ''}`).join('|');
   const changed = signature !== S.dl.signature;
   S.dl.list = list;
   S.dl.signature = signature;

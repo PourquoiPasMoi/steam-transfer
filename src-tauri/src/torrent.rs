@@ -9,6 +9,7 @@
 //! The session is persisted in the app data folder, so unfinished downloads resume when the
 //! app starts again.
 
+use crate::covers::{self, Covers};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions, SessionPersistenceConfig};
 use serde::Serialize;
@@ -50,6 +51,8 @@ pub struct TorrentDto {
     pub seeders: u32,
     pub error: Option<String>,
     pub folder: String,
+    /// cover image URL (picked by the user, included in the download, or matched on Steam)
+    pub cover: Option<String>,
 }
 
 struct Pending {
@@ -65,6 +68,7 @@ pub struct Torrents {
     default_dir: PathBuf,
     pending: Mutex<Vec<Pending>>,
     next: AtomicU64,
+    covers: Arc<Covers>,
 }
 
 /// Display name from a magnet link's `dn=` parameter, if any.
@@ -95,8 +99,9 @@ fn percent_decode(s: &str) -> String {
 }
 
 impl Torrents {
-    pub fn new(data_dir: PathBuf, default_dir: PathBuf) -> Arc<Self> {
+    pub fn new(data_dir: PathBuf, default_dir: PathBuf, covers: Arc<Covers>) -> Arc<Self> {
         Arc::new(Torrents {
+            covers,
             session: OnceCell::new(),
             data_dir,
             default_dir,
@@ -221,6 +226,7 @@ impl Torrents {
                 seeders: 0,
                 error: p.error.clone(),
                 folder: p.folder.to_string_lossy().into_owned(),
+                cover: if p.name.ends_with('…') { None } else { self.covers.url_for(&p.name, None, false) },
             })
             .collect();
 
@@ -247,10 +253,20 @@ impl Torrents {
                     }
                 };
                 let remaining = stats.total_bytes.saturating_sub(stats.progress_bytes);
+                let name = handle.name().unwrap_or_else(|| "Torrent".into());
+                let folder = handle.output_folder();
+                // a multi-file torrent has a folder of its own (named after it); a single file shares the save folder
+                let own_folder = folder
+                    .file_name()
+                    .map(|f| covers::normalize(&f.to_string_lossy()) == covers::normalize(&name))
+                    .unwrap_or(false)
+                    .then_some(folder);
+                let cover = self.covers.url_for(&name, own_folder, stats.finished);
                 TorrentDto {
                     key: format!("t{id}"),
                     id: Some(id),
-                    name: handle.name().unwrap_or_else(|| "Torrent".into()),
+                    cover,
+                    name,
                     state: state.into(),
                     progress_bytes: stats.progress_bytes,
                     total_bytes: stats.total_bytes,
@@ -261,7 +277,7 @@ impl Torrents {
                     peers: peer("live"),
                     seeders: peer("live_seeders"),
                     error: stats.error.clone(),
-                    folder: handle.output_folder().to_string_lossy().into_owned(),
+                    folder: folder.to_string_lossy().into_owned(),
                 }
             })
             .collect()
@@ -325,7 +341,8 @@ mod tests {
         let url = std::env::var("TORRENT_TEST_URL").expect("set TORRENT_TEST_URL");
         let root = std::env::temp_dir().join(format!("steam-transfer-torrent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let torrents = Torrents::new(root.join("data"), root.join("default"));
+        let art: covers::ArtMap = Default::default();
+        let torrents = Torrents::new(root.join("data"), root.join("default"), Covers::new(&root.join("data"), art));
         let out = root.join("downloads");
         tauri::async_runtime::block_on(async {
             torrents.add(Source::Link(url), out.clone()).unwrap();
