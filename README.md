@@ -52,12 +52,16 @@ src-tauri/src/
 
 ## Release a new version
 
-1. `node scripts/bump.mjs 2.0.1`
-2. `git commit -am "v2.0.1"`, then `git tag -a v2.0.1 -m v2.0.1`, then `git push --follow-tags`
+Everything happens on this PC (about 2 minutes):
 
-The **Release** workflow builds the installer, signs the update and publishes the GitHub Release
-with `latest.json`. Installed copies pick it up the next time they start.
+```powershell
+node scripts/release.mjs 2.0.2 "What changed in this version"
+```
 
-The workflow needs two repository secrets: `TAURI_SIGNING_PRIVATE_KEY` (the contents of the
-private key file) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The private key must never be committed.
-If it's lost, installed copies can no longer verify updates, so keep a copy somewhere safe.
+This bumps the version, runs the tests, builds and signs the installer, commits, tags, pushes,
+and uploads the installer, its signature and `latest.json` as a GitHub Release. Installed copies
+offer the update the next time they start.
+
+It needs the updater signing key at `%USERPROFILE%\.tauri\steam-transfer.key` and `gh` signed in
+to the account that owns the repo. Never commit the key. If it's lost, installed copies can't verify
+new updates, so keep a copy somewhere safe.

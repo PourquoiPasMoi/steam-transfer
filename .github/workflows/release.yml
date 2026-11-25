@@ -1,12 +1,12 @@
 # Builds the Windows installer and publishes a GitHub Release with the signed
 # updater manifest (latest.json) that installed copies check on startup.
 #
-# Release a new version:  node scripts/bump.mjs 2.0.1 && git commit -am "v2.0.1" && git tag -a v2.0.1 -m v2.0.1 && git push --follow-tags
+# Normal releases: node scripts/release.mjs 2.0.2 "notes"  (builds on this PC)
 name: Release
 
+# Releases are normally built on your PC with scripts/release.mjs.
+# This workflow only runs if started by hand from the Actions tab.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
