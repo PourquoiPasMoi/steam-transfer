@@ -1127,18 +1127,49 @@ async function removeTorrent(t) {
   } catch (e) { showError(e); }
 }
 
+/** The rows of a download's details: [id, label, value, cssClass]. Which rows appear depends only on
+ *  the download's stage, so the open details can refresh their values in place every second. */
+function torrentFacts(t) {
+  const rows = [];
+  const add = (id, label, value, cls) => rows.push([id, label, value, cls || null]);
+  add('status', 'Status', { fetching: 'Fetching torrent info from peers (you can pause this)', checking: 'Checking existing files', downloading: 'Downloading', paused: 'Paused', seeding: 'Finished (sharing with others while the app is open)', error: 'Error' }[t.state], t.state === 'seeding' ? 'good' : t.state === 'error' ? 'warn-text' : null);
+  if (t.error) add('error', 'Problem', t.error, 'warn-text');
+  if (t.total_bytes) add('size', 'Size', fmtBytes(t.total_bytes));
+  if (t.total_bytes) add('done', 'Downloaded', `${fmtBytes(t.progress_bytes)} (${torrentPct(t).toFixed(1)}%)`);
+  if (t.state === 'downloading' || t.state === 'seeding') add('speed', 'Speed', `↓ ${fmtBytes(t.down_bps)}/s   ↑ ${fmtBytes(t.up_bps)}/s`);
+  if (t.state === 'downloading') add('eta', 'Time left', t.eta_secs ? fmtEta(t.eta_secs) : 'working it out…');
+  if (t.id != null) add('peers', 'Peers', t.peers ? `${t.peers} connected (${t.seeders} seeders)` : 'looking for peers…');
+  if (t.id != null) add('up', 'Uploaded', fmtBytes(t.uploaded_bytes));
+  add('folder', 'Saved to', t.folder);
+  return rows;
+}
+
+/** The download whose details are open, so polling can keep them current. */
+let openTorrent = null;
+
+function refreshOpenTorrent() {
+  if (!openTorrent || !modalOpen()) return;
+  const t = S.dl.list.find((x) => x.key === openTorrent.key);
+  if (!t) return;
+  const rows = torrentFacts(t);
+  const layout = `${t.state}|${t.cover || ''}|${rows.map((r) => r[0]).join(',')}`;
+  if (layout !== openTorrent.layout) return openTorrentCase(t);   // stage changed: rebuild
+  for (const [id, , value, cls] of rows) {
+    const dd = openTorrent.cells.get(id);
+    if (!dd) continue;
+    if (dd.textContent !== value) dd.textContent = value;
+    dd.className = cls || '';
+  }
+}
+
 function openTorrentCase(t) {
-  const facts = [];
-  const add = (k, v, cls) => facts.push(h('dt', {}, k), h('dd', { class: cls || null }, v));
-  add('Status', { fetching: 'Fetching torrent info from peers (you can pause this)', checking: 'Checking existing files', downloading: 'Downloading', paused: 'Paused', seeding: 'Finished (sharing with others while the app is open)', error: 'Error' }[t.state], t.state === 'seeding' ? 'good' : t.state === 'error' ? 'warn-text' : null);
-  if (t.error) add('Problem', t.error, 'warn-text');
-  if (t.total_bytes) add('Size', fmtBytes(t.total_bytes));
-  if (t.total_bytes) add('Downloaded', `${fmtBytes(t.progress_bytes)} (${torrentPct(t).toFixed(1)}%)`);
-  if (t.state === 'downloading') add('Speed', `↓ ${fmtBytes(t.down_bps)}/s   ↑ ${fmtBytes(t.up_bps)}/s`);
-  if (t.state === 'downloading' && t.eta_secs) add('Time left', fmtEta(t.eta_secs));
-  if (t.id != null) add('Peers', `${t.peers} connected (${t.seeders} seeders)`);
-  if (t.uploaded_bytes) add('Uploaded', fmtBytes(t.uploaded_bytes));
-  add('Saved to', t.folder);
+  const rows = torrentFacts(t);
+  const cells = new Map();
+  const facts = rows.flatMap(([id, label, value, cls]) => {
+    const dd = h('dd', { class: cls }, value);
+    cells.set(id, dd);
+    return [h('dt', {}, label), dd];
+  });
   const actions = [];
   if (['downloading', 'checking', 'fetching'].includes(t.state)) actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Pause'));
   if (t.state === 'paused') actions.push(h('button', { class: 'btn violet', onclick: () => { closeModal(); torrentPrimary(t); } }, 'Resume'));
@@ -1155,12 +1186,14 @@ function openTorrentCase(t) {
     img.onerror = () => front.replaceWith(cdr());
     front.append(img);
   }
-  showModal(h('div', { class: 'case' }, front,
+  const rebuilding = openTorrent && openTorrent.key === t.key && modalOpen();
+  showModal(h('div', { class: `case ${rebuilding ? 'no-anim' : ''}` }, front,
     h('div', { class: 'liner' },
       h('h2', {}, t.name),
       h('div', { class: 'sub' }, 'Torrent download'),
       h('dl', { class: 'facts' }, facts),
-      h('div', { class: 'actions' }, actions))), true);
+      h('div', { class: 'actions' }, actions))), true, () => { openTorrent = null; });
+  openTorrent = { key: t.key, layout: `${t.state}|${t.cover || ''}|${rows.map((r) => r[0]).join(',')}`, cells };
 }
 
 const limitText = (kbps) => (kbps ? h('span', { class: 'limit' }, ` / max ${fmtBytes(kbps * 1024)}/s`) : null);
@@ -1223,6 +1256,7 @@ async function pollTorrents(force) {
     if (changed || force) renderAll();
     else updateTorrentSleeves();
   }
+  refreshOpenTorrent();
   if (!S.queue.current && !S.updating) renderDeck();
 }
 
