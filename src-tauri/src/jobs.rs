@@ -398,7 +398,21 @@ fn run_restore(package_path: &Path, library: &Path, ctx: &Ctx, result: &mut JobR
     if sys::steam_running() {
         return Err(Stop::Failed("Steam is running. Exit Steam completely (including the tray icon) before restoring, so it can't overwrite the game's manifest.".into()));
     }
-    restore_package(package_path, library, ctx, result)
+    let added = make_library_known(library)?;
+    restore_package(package_path, library, ctx, result)?;
+    if added {
+        result.message.push_str(" The library was added to Steam.");
+    }
+    Ok(())
+}
+
+/// Make sure Steam knows the target library (adding it to Steam's list if needed).
+/// Returns true when it was added now. Without Steam installed, the files are still copied.
+fn make_library_known(library: &Path) -> StopResult<bool> {
+    if steam::steam_root().is_none() || steam::is_registered(library) {
+        return Ok(false);
+    }
+    steam::register_library(library).map_err(Stop::Failed)
 }
 
 /// Restore (or resume, or update) one backup into a Steam library.
@@ -521,7 +535,12 @@ fn run_move(app_id: &str, library: &Path, ctx: &Ctx, result: &mut JobResult) -> 
         return Err(Stop::Failed("Steam is running. Exit Steam completely (including the tray icon) before moving a game, so it doesn't keep using the old location.".into()));
     }
     let game = find_game(app_id)?;
-    move_game(&game, library, false, ctx, result)
+    let added = make_library_known(library)?;
+    move_game(&game, library, false, ctx, result)?;
+    if added {
+        result.message.push_str(" The library was added to Steam.");
+    }
+    Ok(())
 }
 
 /// Move a game to another Steam library. Order matters so Steam is never left without a valid install:

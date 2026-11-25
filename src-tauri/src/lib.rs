@@ -187,9 +187,40 @@ async fn find_binders() -> CmdResult<Vec<DriveDto>> {
     .map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+struct LibraryDto {
+    path: PathBuf,
+    free_bytes: Option<u64>,
+    /// false = found on a drive but Steam doesn't list it yet (it gets added on first use)
+    registered: bool,
+}
+
+/// Every Steam library on every drive.
 #[tauri::command]
-async fn list_libraries() -> CmdResult<Vec<DriveDto>> {
-    Ok(steam::libraries().into_iter().map(|l| DriveDto { free_bytes: sys::free_space(&l), path: l }).collect())
+async fn list_libraries() -> CmdResult<Vec<LibraryDto>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        steam::all_libraries()
+            .into_iter()
+            .map(|l| LibraryDto { free_bytes: sys::free_space(&l.path), registered: l.registered, path: l.path })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+struct CreatedLibrary {
+    path: PathBuf,
+    note: String,
+}
+
+/// Create a Steam library on the chosen drive/folder and add it to Steam.
+#[tauri::command]
+async fn create_library(path: String) -> CmdResult<CreatedLibrary> {
+    tauri::async_runtime::spawn_blocking(move || steam::create_library(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(path, note)| CreatedLibrary { path, note })
 }
 
 #[tauri::command]
@@ -509,6 +540,7 @@ pub fn run() {
             scan_binder,
             find_binders,
             list_libraries,
+            create_library,
             detect_library,
             library_state,
             steam_running,

@@ -481,7 +481,7 @@ function emptyState(items) {
   } else if (S.mode === 'download') {
     if (!S.dl.list.length) return note('Paste a magnet link', 'Paste a magnet link in the box above (or open a .torrent file), pick where to save it and press Download. Progress, speed and peers show up here, and unfinished downloads carry on when you reopen the app.', []);
   } else if (S.mode === 'move') {
-    if (S.move.libraries.length < 2) return note('You need a second Steam library', 'Moving works between Steam libraries on this PC. In Steam open Settings > Storage, use "Add Drive" to pick the other drive, then press Refresh here.', [h('button', { class: 'btn', onclick: refreshMove }, 'Refresh')]);
+    if (S.move.libraries.length < 2) return note('You need a second Steam library', 'Moving works between Steam libraries on this PC. Pick the other drive and the app creates a Steam library there and adds it to Steam for you (Steam needs to be closed).', [h('button', { class: 'btn', onclick: () => newLibrary('move') }, 'New Steam library…'), h('button', { class: 'btn ghost', onclick: refreshMove }, 'Refresh')]);
     if (!items.length && !S.search && S.filter === 'all') return note('No games in this library', 'Pick another library in the From list.', []);
   } else {
     if (!S.restore.binder) return note('Where are your discs?', 'Plug in the drive that has your backups and pick it. The app looks for its "Steam Transfer" folder.', [h('button', { class: 'btn blue', onclick: chooseRestoreSource }, 'Choose backup drive')]);
@@ -621,8 +621,12 @@ function renderLocation() {
       ...sourceOptions.map((p) => h('option', { value: p, selected: r.binder && p === r.binder.root }, p)),
       h('option', { value: '__browse' }, 'Browse…'));
     const libOptions = uniquePaths([...(r.library ? [r.library] : []), ...r.libraries.map((l) => l.path)]);
-    const libSel = h('select', { class: 'select', onchange: (e) => e.target.value === '__browse' ? chooseRestoreTarget() : setRestoreTarget(e.target.value) },
-      ...libOptions.map((p) => h('option', { value: p, selected: samePath(p, r.library) }, p)),
+    const libSel = h('select', {
+      class: 'select',
+      onchange: (e) => e.target.value === '__browse' ? chooseRestoreTarget() : e.target.value === '__new' ? newLibrary('restore') : setRestoreTarget(e.target.value),
+    },
+      ...libOptions.map((p) => h('option', { value: p, selected: samePath(p, r.library) }, libraryLabel(p, r.libraries))),
+      h('option', { value: '__new' }, '＋ New Steam library on another drive…'),
       h('option', { value: '__browse' }, 'Browse…'));
     const items = restoreItems();
     appendAll(loc,
@@ -663,14 +667,16 @@ function renderLocation() {
     if (libs.length < 2) {
       appendAll(loc,
         h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Move between'), h('span', { class: 'drive-free' }, `${libs.length} Steam library found`)),
+        h('button', { class: 'btn', onclick: () => newLibrary('move') }, '＋ New Steam library…'),
         h('button', { class: 'btn ghost', onclick: refreshMove, title: 'Rescan' }, '↻ Refresh'));
       return;
     }
     const countIn = (lib) => S.games.filter((g) => samePath(g.library_root, lib)).length;
     const fromSel = h('select', { class: 'select', onchange: (e) => setMoveFrom(e.target.value) },
       ...libs.map((l) => h('option', { value: l.path, selected: samePath(l.path, m.from) }, `${l.path}  (${countIn(l.path)} games)`)));
-    const toSel = h('select', { class: 'select', onchange: (e) => setMoveTo(e.target.value) },
-      ...libs.filter((l) => !samePath(l.path, m.from)).map((l) => h('option', { value: l.path, selected: samePath(l.path, m.to) }, `${l.path}  (${fmtBytes(l.free_bytes)} free)`)));
+    const toSel = h('select', { class: 'select', onchange: (e) => e.target.value === '__new' ? newLibrary('move') : setMoveTo(e.target.value) },
+      ...libs.filter((l) => !samePath(l.path, m.from)).map((l) => h('option', { value: l.path, selected: samePath(l.path, m.to) }, libraryLabel(l.path, libs))),
+      h('option', { value: '__new' }, '＋ New Steam library on another drive…'));
     const items = moveItems();
     appendAll(loc,
       h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'From'), fromSel),
@@ -1011,11 +1017,45 @@ async function chooseRestoreTarget() {
   if (!picked) { renderLocation(); return; }
   const lib = await call('detect_library', { path: picked });
   if (!lib) {
-    dialog('That isn\'t a Steam library', `No Steam library was found at ${picked}.\n\nOpen Steam > Settings > Storage, add a library on that drive, exit Steam, then choose it here.`, [['OK', 'primary']]);
+    const choice = await dialog('Create a Steam library there?', `There's no Steam library at ${picked} yet.\n\nSteam Transfer can create one and add it to Steam for you, so restored games show up as installed. Steam needs to be closed for this.`, [['Cancel', ''], ['Create library', 'primary', 'create']]);
+    if (choice === 'create') return createLibraryAt(picked, 'restore');
     renderLocation();
     return;
   }
   setRestoreTarget(lib);
+}
+
+function libraryLabel(path, libraries) {
+  const info = libraries.find((l) => samePath(l.path, path));
+  if (!info) return path;
+  const free = info.free_bytes != null ? `  ·  ${fmtBytes(info.free_bytes)} free` : '';
+  return `${path}${free}${info.registered === false ? '  ·  not in Steam yet (added on first use)' : ''}`;
+}
+
+/** Pick a drive or folder and create a Steam library there. */
+async function newLibrary(forTab) {
+  const picked = await call('pick_folder', { title: 'Pick the drive (or folder) for the new Steam library', start: null }).catch(showError);
+  if (!picked) { renderLocation(); return; }
+  return createLibraryAt(picked, forTab);
+}
+
+async function createLibraryAt(picked, forTab) {
+  try {
+    const created = await call('create_library', { path: picked });
+    toast('Steam library ready', `${created.path}\n${created.note}`, 'ok');
+    if (forTab === 'move') {
+      S.move.to = created.path;
+      S.settings.move_to = created.path;
+      saveSettings();
+      await refreshMove();
+    } else {
+      S.restore.libraries = await call('list_libraries').catch(() => S.restore.libraries);
+      await setRestoreTarget(created.path);
+    }
+  } catch (e) {
+    showError(e);
+    renderLocation();
+  }
 }
 
 async function setRestoreTarget(lib) {
