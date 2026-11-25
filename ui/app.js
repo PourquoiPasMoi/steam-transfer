@@ -520,7 +520,7 @@ function torrentSleeveEl(item, i) {
     onclick: (e) => { e.stopPropagation(); torrentPrimary(t); },
   }, ACTIONS.download[t.state] || 'Details');
   return h('div', {
-    class: `sleeve ${t.state === 'downloading' || t.state === 'fetching' ? 'busy' : ''} ${t.state === 'error' ? 'dim' : ''}`,
+    class: `sleeve torrent ${t.state === 'downloading' || t.state === 'fetching' ? 'busy' : ''} ${t.state === 'error' ? 'dim' : ''}`,
     role: 'button', tabindex: '0', style: `--i:${i}`, dataset: { key: item.key }, title: t.name,
     onclick: () => openTorrentCase(t),
     onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTorrentCase(t); } },

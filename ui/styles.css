@@ -576,6 +576,8 @@ button:disabled { cursor: default; }
 .sleeve:focus-visible { outline: none; }
 .sleeve:focus-visible .pocket { box-shadow: inset 0 0 0 2px #f2c14e; }
 .sleeve.busy .disc { animation: spin 1.1s linear infinite; }
+/* downloads take hours, not minutes: their discs turn slowly */
+.sleeve.torrent.busy .disc { animation-duration: 6s; }
 .sleeve.dim .disc { filter: grayscale(0.85) brightness(0.6); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
