@@ -311,10 +311,54 @@ button:disabled { cursor: default; }
 .page-left { border-radius: 10px 4px 4px 10px; }
 .page-right { border-radius: 4px 10px 10px 4px; }
 .page.single { border-radius: 10px; }
-.page.turn-next { animation: turnNext 0.42s var(--ease); transform-origin: left center; }
-.page.turn-prev { animation: turnPrev 0.42s var(--ease); transform-origin: right center; }
-@keyframes turnNext { from { transform: perspective(1600px) rotateY(-28deg); opacity: 0.2; } }
-@keyframes turnPrev { from { transform: perspective(1600px) rotateY(28deg); opacity: 0.2; } }
+.page.quiet .sleeve { animation: none; }
+
+/* ---------------------------------------------------------------- page turn */
+.spread { position: relative; }
+.turn-layer {
+  position: absolute; inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  perspective: 2600px;
+  perspective-origin: 50% 40%;
+}
+.turn-cover, .turn-shadow, .leaf { position: absolute; }
+.turn-cover > .page, .face > .page { box-sizing: border-box; }
+.snap, .snap * { animation: none !important; transition: none !important; }
+.turn-shadow {
+  opacity: 0;
+  border-radius: 6px;
+}
+.turn-shadow.from-left { background: linear-gradient(90deg, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0.25) 45%, transparent 85%); }
+.turn-shadow.from-right { background: linear-gradient(270deg, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0.25) 45%, transparent 85%); }
+.leaf { transform-style: preserve-3d; }
+.strip-3d {
+  position: absolute; top: 0;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+.face {
+  position: absolute; top: 0; left: 0; height: 100%;
+  overflow: hidden;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  background: linear-gradient(180deg, #222327, var(--page));
+}
+.face.back { transform: rotateY(180deg); }
+.face.blank {
+  /* the reverse of a sheet: empty clear sleeves */
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.06), transparent 40%),
+    repeating-linear-gradient(90deg, transparent 0 60px, rgba(255, 255, 255, 0.025) 60px 61px),
+    linear-gradient(180deg, #26272b, #1c1d20);
+}
+.face .shade {
+  position: absolute; inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.face.front .shade { background: linear-gradient(90deg, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.85)); }
+.face.back .shade { background: linear-gradient(90deg, rgba(255, 255, 255, 0.18), rgba(0, 0, 0, 0.55)); }
 
 .rings {
   flex: none;

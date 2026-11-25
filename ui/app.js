@@ -225,18 +225,177 @@ function perSpread() {
   return S.layout.perPage * (S.layout.single ? 1 : 2);
 }
 
+let turning = null;      // running page-turn animation
+let queuedFlip = 0;      // flips requested while a turn is running
+
 function flip(dir) {
+  if (turning) { queuedFlip = dir; turning.speedUp(); return; }
   const items = visibleItems();
   const spreads = Math.max(1, Math.ceil(items.length / perSpread()));
   const next = Math.min(spreads - 1, Math.max(0, S.spread + dir));
   if (next === S.spread) return;
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Snapshot the pages as they look now, then render the new spread underneath.
+  const oldLeft = snapshot($('#pageLeft')), oldRight = snapshot($('#pageRight'));
   S.spread = next;
-  renderPages(dir > 0 ? 'turn-next' : 'turn-prev');
+  renderPages(true);
+  if (reduced) return;
+
+  const left = $('#pageLeft'), right = $('#pageRight');
+  let plan;
+  if (S.layout.single) {
+    // One page: the sheet lifts off the rings on the left and turns away (or comes back for "previous").
+    plan = dir > 0
+      ? { anchor: 'left', page: left, front: oldLeft, back: null, cover: null, reverse: false }
+      : { anchor: 'left', page: left, front: snapshot(left), back: null, cover: { page: left, el: oldLeft }, reverse: true };
+  } else if (dir > 0) {
+    // Right-hand sheet turns over the rings onto the left side.
+    plan = { anchor: 'left', page: right, front: oldRight, back: snapshot(left), cover: { page: left, el: oldLeft }, reverse: false };
+  } else {
+    // Left-hand sheet turns back onto the right side.
+    plan = { anchor: 'right', page: left, front: oldLeft, back: snapshot(right), cover: { page: right, el: oldRight }, reverse: false };
+  }
+  turning = turnPage(plan);
+  turning.done.then(() => {
+    turning = null;
+    if (queuedFlip) { const d = queuedFlip; queuedFlip = 0; flip(d); }
+  });
+}
+
+/** Static copy of a page (no ids, no entry animations) to paint onto the turning sheet. */
+function snapshot(page) {
+  const copy = page.cloneNode(true);
+  copy.removeAttribute('id');
+  copy.classList.add('snap');
+  copy.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+  return copy;
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+/**
+ * Curling page turn. The sheet is cut into vertical strips chained in 3D, each rotated a little
+ * more than the one before it, so the sheet bends like paper: the free edge leads, the part near
+ * the rings follows. Front strips show the old page, back strips show the page being revealed.
+ */
+function turnPage({ anchor, page, front, back, cover, reverse }) {
+  const spread = $('#spread');
+  const base = spread.getBoundingClientRect();
+  const r = page.getBoundingClientRect();
+  const W = r.width, H = r.height;
+  const N = 12;
+  const w = W / N;
+  const sign = anchor === 'left' ? -1 : 1;
+
+  const layer = h('div', { class: 'turn-layer' });
+  const place = (el, rect) => Object.assign(el.style, { left: `${rect.left - base.left}px`, top: `${rect.top - base.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+
+  // The old page that stays put under the turning sheet until it lands on it.
+  if (cover) {
+    const holder = h('div', { class: 'turn-cover' });
+    place(holder, cover.page.getBoundingClientRect());
+    cover.el.style.width = '100%';
+    cover.el.style.height = '100%';
+    holder.append(cover.el);
+    layer.append(holder);
+  }
+  // Shadow the sheet casts on the page it is lifting away from.
+  const shadow = h('div', { class: `turn-shadow from-${anchor}` });
+  place(shadow, r);
+  layer.append(shadow);
+
+  const leaf = h('div', { class: 'leaf' });
+  place(leaf, r);
+  layer.append(leaf);
+
+  const strips = [];
+  let parent = leaf;
+  for (let k = 0; k < N; k++) {
+    const strip = h('div', { class: 'strip-3d' });
+    strip.style.width = `${w}px`;
+    strip.style.height = `${H}px`;
+    if (anchor === 'left') {
+      strip.style.left = k === 0 ? '0px' : `${w}px`;
+      strip.style.transformOrigin = 'left center';
+    } else {
+      strip.style.left = k === 0 ? `${W - w}px` : `${-w}px`;
+      strip.style.transformOrigin = 'right center';
+    }
+    // which horizontal slice of the page each face shows (see derivation in the comment above)
+    const frontX = anchor === 'left' ? k * w : W - (k + 1) * w;
+    const backX = anchor === 'left' ? W - (k + 1) * w : k * w;
+    const face = (src, x, cls) => {
+      const f = h('div', { class: `face ${cls}` });
+      f.style.width = `${w + 1}px`;
+      if (src) {
+        const c = k === 0 ? src : src.cloneNode(true);
+        Object.assign(c.style, { position: 'absolute', left: `${-x}px`, top: '0px', width: `${W}px`, height: `${H}px`, margin: '0' });
+        f.append(c);
+      } else {
+        f.classList.add('blank');
+      }
+      const shade = h('div', { class: 'shade' });
+      f.append(shade);
+      return { f, shade };
+    };
+    const fr = face(front, frontX, 'front');
+    const bk = face(back, backX, 'back');
+    strip.append(fr.f, bk.f);
+    parent.append(strip);
+    strips.push({ el: strip, frontShade: fr.shade, backShade: bk.shade });
+    parent = strip;
+  }
+  // The first strip took the original snapshot nodes; later strips cloned them.
+  spread.append(layer);
+
+  let duration = 820;
+  let start = null;
+  let resolve;
+  const done = new Promise((res) => (resolve = res));
+
+  function frame(now) {
+    if (start == null) start = now;
+    let t = clamp((now - start) / duration, 0, 1);
+    const p = reverse ? 1 - t : t;
+    const e = easeInOut(p);
+    const bend = Math.sin(Math.PI * p) * 62;              // how much the paper curls mid-turn
+    const edge = clamp(180 * e + bend * 0.75, 0, 180);     // free edge leads...
+    const spine = clamp(180 * e - bend * 0.55, 0, 180);    // ...the part at the rings lags
+    let prev = 0;
+    for (let k = 0; k < N; k++) {
+      const A = spine + (edge - spine) * Math.pow(k / (N - 1), 1.35);
+      const s = strips[k];
+      s.el.style.transform = `rotateY(${sign * (A - prev)}deg)`;
+      prev = A;
+      const lit = Math.sin((A * Math.PI) / 180);
+      // light comes from the top-left: the rising front darkens, the back is bright then settles
+      s.frontShade.style.opacity = (lit * 0.55).toFixed(3);
+      s.backShade.style.opacity = (lit * 0.35 + (A > 90 ? 0 : 0.2)).toFixed(3);
+    }
+    shadow.style.opacity = (Math.sin(Math.PI * p) * 0.75).toFixed(3);
+    if (t < 1) requestAnimationFrame(frame);
+    else { layer.remove(); resolve(); }
+  }
+  requestAnimationFrame(frame);
+
+  return {
+    done,
+    // a second click while turning finishes this turn quickly, then plays the next one
+    speedUp() {
+      if (start == null) return;
+      const now = performance.now();
+      const t = (now - start) / duration;
+      duration = Math.max(260, duration * 0.45);
+      start = now - t * duration;
+    },
+  };
 }
 
 // ------------------------------------------------------------------------------------------ render: binder
 
-function renderPages(anim) {
+function renderPages(quiet) {
   const items = visibleItems();
   const ps = perSpread();
   const spreads = Math.max(1, Math.ceil(items.length / ps));
@@ -254,10 +413,8 @@ function renderPages(anim) {
     if (!S.layout.single) items.slice(start + S.layout.perPage, start + ps).forEach((it, i) => right.append(sleeveEl(it, i + S.layout.perPage)));
   }
 
-  for (const p of [left, right]) {
-    p.classList.remove('turn-next', 'turn-prev');
-    if (anim) { void p.offsetWidth; p.classList.add(anim); }
-  }
+  // During a page turn the sleeves are already "in place", so skip their drop-in animation.
+  for (const p of [left, right]) p.classList.toggle('quiet', !!quiet);
   $('#prevPage').disabled = S.spread <= 0;
   $('#nextPage').disabled = S.spread >= spreads - 1;
   const pages = Math.max(1, Math.ceil(items.length / S.layout.perPage));
