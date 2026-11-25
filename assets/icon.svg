@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="base" cx="50%" cy="50%" r="50%">
+      <stop offset="0.18" stop-color="#d9dde3"/>
+      <stop offset="0.2" stop-color="#9aa3ad"/>
+      <stop offset="0.34" stop-color="#e9edf2"/>
+      <stop offset="1" stop-color="#b8c0c9"/>
+    </radialGradient>
+    <linearGradient id="rainbow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5fa2" stop-opacity="0.75"/>
+      <stop offset="0.25" stop-color="#ffd25f" stop-opacity="0.6"/>
+      <stop offset="0.5" stop-color="#5fffc1" stop-opacity="0.55"/>
+      <stop offset="0.75" stop-color="#5fa8ff" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#b45fff" stop-opacity="0.75"/>
+    </linearGradient>
+    <linearGradient id="label" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a6df4"/>
+      <stop offset="1" stop-color="#123a8f"/>
+    </linearGradient>
+    <mask id="hole">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="512" cy="512" r="70" fill="#000"/>
+    </mask>
+  </defs>
+  <g mask="url(#hole)">
+    <circle cx="512" cy="512" r="470" fill="url(#base)"/>
+    <path d="M512 512 L982 512 A470 470 0 0 0 844 180 Z" fill="url(#rainbow)" opacity="0.9"/>
+    <path d="M512 512 L42 512 A470 470 0 0 0 180 844 Z" fill="url(#rainbow)" opacity="0.9"/>
+    <circle cx="512" cy="512" r="300" fill="url(#label)"/>
+    <path d="M392 388 h236 l-52 -52 M632 636 h-236 l52 52" fill="none" stroke="#fff" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="512" cy="512" r="112" fill="#c9d0d8"/>
+    <circle cx="512" cy="512" r="112" fill="none" stroke="#8d96a1" stroke-width="10"/>
+    <circle cx="512" cy="512" r="470" fill="none" stroke="#7d8692" stroke-width="10"/>
+  </g>
+</svg>

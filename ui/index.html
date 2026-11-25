@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steam Transfer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <span class="brand-disc" aria-hidden="true"></span>
+      <span class="tape" data-tauri-drag-region>STEAM TRANSFER</span>
+      <button class="version" id="version" title="Check for updates">v2.0.0</button>
+    </div>
+    <div class="titlebar-right" data-tauri-drag-region>
+      <button class="update-pill hidden" id="updatePill"></button>
+      <div class="window-controls">
+        <button id="winMin" aria-label="Minimise"><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
+        <button id="winMax" aria-label="Maximise"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>
+        <button id="winClose" class="close" aria-label="Close"><svg viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <nav class="toolbar">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-mode="backup" role="tab">
+        <span class="tab-title">Back up</span><span class="tab-sub">PC → drive</span>
+      </button>
+      <button class="tab" data-mode="restore" role="tab">
+        <span class="tab-title">Restore</span><span class="tab-sub">drive → PC</span>
+      </button>
+    </div>
+    <label class="search">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4.5 4.5"/></svg>
+      <input id="search" type="search" placeholder="Find a disc…" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="filters" id="filters"></div>
+  </nav>
+
+  <section class="location" id="location"></section>
+
+  <main class="desk">
+    <div class="binder" id="binder">
+      <div class="zip zip-top"></div>
+      <div class="zip zip-bottom"></div>
+      <div class="spread" id="spread">
+        <div class="page page-left" id="pageLeft"></div>
+        <div class="rings" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <div class="page page-right" id="pageRight"></div>
+      </div>
+      <button class="flip flip-prev" id="prevPage" aria-label="Previous page">‹</button>
+      <button class="flip flip-next" id="nextPage" aria-label="Next page">›</button>
+      <div class="page-count" id="pageCount"></div>
+    </div>
+  </main>
+
+  <footer class="deck" id="deck">
+    <div class="tray"><div class="tray-disc" id="trayDisc"></div></div>
+    <div class="lcd" id="lcd">
+      <div class="lcd-row lcd-title"><span id="lcdTitle">READY</span><span id="lcdPct"></span></div>
+      <div class="lcd-bar"><div class="lcd-fill" id="lcdFill"></div></div>
+      <div class="lcd-row lcd-small"><span id="lcdStats">INSERT A DISC: PICK A GAME</span><span id="lcdEta"></span></div>
+      <div class="lcd-file" id="lcdFile"></div>
+    </div>
+    <div class="deck-keys">
+      <button class="key" id="stopBtn" disabled title="Stop (you can resume later)"><span class="key-glyph">■</span><span>STOP</span></button>
+    </div>
+    <div class="queue" id="queue">
+      <div class="queue-label">UP NEXT</div>
+      <div class="queue-list" id="queueList"><span class="queue-empty">empty</span></div>
+    </div>
+  </footer>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="modal-root hidden" id="modalRoot"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+# Builds the Windows installer and publishes a GitHub Release with the signed
+# updater manifest (latest.json) that installed copies check on startup.
+#
+# Release a new version:  node scripts/bump.mjs 2.0.1 && git commit -am "v2.0.1" && git tag v2.0.1 && git push --follow-tags
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - run: npm ci
+
+      - name: Unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Steam Transfer v__VERSION__
+          releaseBody: |
+            Download **Steam Transfer_*_x64-setup.exe** below and run it (no admin needed).
+            Already installed? The app offers this update automatically.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
