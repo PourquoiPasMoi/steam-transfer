@@ -296,12 +296,12 @@ function flip(dir) {
   const left = $('#pageLeft'), right = $('#pageRight');
   let plan;
   if (S.layout.single) {
-    // One page: the sheet lifts off the rings on the left and turns away (or comes back for "previous").
+    // One page: the sheet lifts off the spine on the left and turns away (or comes back for "previous").
     plan = dir > 0
       ? { anchor: 'left', page: left, front: oldLeft, back: null, cover: null, reverse: false }
       : { anchor: 'left', page: left, front: snapshot(left), back: null, cover: { page: left, el: oldLeft }, reverse: true };
   } else if (dir > 0) {
-    // Right-hand sheet turns over the rings onto the left side.
+    // Right-hand sheet turns over the spine onto the left side.
     plan = { anchor: 'left', page: right, front: oldRight, back: snapshot(left), cover: { page: left, el: oldLeft }, reverse: false };
   } else {
     // Left-hand sheet turns back onto the right side.
@@ -329,7 +329,7 @@ const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) 
 /**
  * Curling page turn. The sheet is cut into vertical strips chained in 3D, each rotated a little
  * more than the one before it, so the sheet bends like paper: the free edge leads, the part near
- * the rings follows. Front strips show the old page, back strips show the page being revealed.
+ * the spine follows. Front strips show the old page, back strips show the page being revealed.
  */
 function turnPage({ anchor, page, front, back, cover, reverse }) {
   const spread = $('#spread');
