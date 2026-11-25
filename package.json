@@ -1,7 +1,7 @@
 {
   "name": "steam-transfer",
   "private": true,
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Back up Steam games to an external drive and restore them on another PC.",
   "scripts": {
     "tauri": "tauri",
