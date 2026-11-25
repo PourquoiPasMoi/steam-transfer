@@ -339,15 +339,20 @@ async fn torrent_downloading(app: AppHandle) -> CmdResult<bool> {
     Ok(torrents.downloading().await)
 }
 
-/// The updater, optionally pointed at another manifest via STEAM_TRANSFER_UPDATE_URL (used for testing updates).
+/// Test-only override for the update feed. Never passed on to the installer or the reopened app.
+pub const TEST_FEED_VAR: &str = "STEAM_TRANSFER_UPDATE_URL";
+
+/// The updater for GitHub releases. A test feed set through STEAM_TRANSFER_UPDATE_URL is used only
+/// when this build accepts it (release builds require https); otherwise it is ignored, so a stray
+/// setting can never stop real updates.
 fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     use tauri_plugin_updater::UpdaterExt;
-    let mut builder = app.updater_builder();
-    if let Ok(url) = std::env::var("STEAM_TRANSFER_UPDATE_URL") {
-        let url = url.parse().map_err(|e| format!("Bad STEAM_TRANSFER_UPDATE_URL: {e}"))?;
-        builder = builder.endpoints(vec![url]).map_err(|e| e.to_string())?;
+    if let Some(url) = std::env::var(TEST_FEED_VAR).ok().and_then(|u| u.parse().ok()) {
+        if let Ok(test) = app.updater_builder().endpoints(vec![url]).and_then(|b| b.build()) {
+            return Ok(test);
+        }
     }
-    builder.build().map_err(|e| e.to_string())
+    app.updater_builder().build().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -234,8 +234,9 @@ pub fn apply_update(args: &[String]) -> i32 {
         return 2;
     };
     win::wait_or_kill(pid, std::time::Duration::from_secs(20));
-    let status = std::process::Command::new(installer).args(["/P", "/UPDATE"]).status();
-    let _ = std::process::Command::new(app).spawn();
+    // a test feed setting must not follow the app into the new version
+    let status = std::process::Command::new(installer).args(["/P", "/UPDATE"]).env_remove(crate::TEST_FEED_VAR).status();
+    let _ = std::process::Command::new(app).env_remove(crate::TEST_FEED_VAR).spawn();
     match status {
         Ok(s) if s.success() => 0,
         _ => 1,
