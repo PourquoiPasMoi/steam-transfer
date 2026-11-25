@@ -46,7 +46,7 @@ pub fn steam_root() -> Option<PathBuf> {
                 if let Ok(path) = k.get_value::<String, _>(value) {
                     let path = PathBuf::from(path.replace('/', "\\"));
                     if path.is_dir() {
-                        return Some(path);
+                        return Some(true_case(path));
                     }
                 }
             }
@@ -54,6 +54,21 @@ pub fn steam_root() -> Option<PathBuf> {
     }
     let default = PathBuf::from("C:\\Program Files (x86)\\Steam");
     default.is_dir().then_some(default)
+}
+
+/// Steam stores its path in lowercase ("c:/program files (x86)/steam"); ask Windows for the real capitalisation.
+fn true_case(path: PathBuf) -> PathBuf {
+    match fs::canonicalize(&path) {
+        Ok(full) => {
+            let s = full.to_string_lossy();
+            match s.strip_prefix(r"\\?\") {
+                // keep plain drive paths only; leave UNC/odd forms as they were
+                Some(rest) if rest.chars().nth(1) == Some(':') => PathBuf::from(rest),
+                _ => path,
+            }
+        }
+        Err(_) => path,
+    }
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {

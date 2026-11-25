@@ -27,6 +27,12 @@
     G('2997360', 'The Other Side Demo', 11350740826, '22472975'),
     G('3041230', 'Windrose', 22415016556, '24803703'),
   ];
+  // a few games live in a second library so the Move tab has something to show
+  for (const id of ['2507950', '2139460', '578080']) {
+    const g = games.find((x) => x.app_id === id);
+    g.library_root = 'E:\\SteamLibrary';
+    g.game_path = `E:\\SteamLibrary\\steamapps\\common\\${g.name}`;
+  }
   const pkg = (id, status, build) => {
     const g = games.find((x) => x.app_id === id);
     return { path: `D:\\Steam Transfer\\${g.name} (App ${id})`, app_id: id, name: g.name, install_dir: g.name, build_id: build ?? g.build_id, status, bytes: g.size_on_disk, files: 1234, completed_at: '2026-11-20 21:14:03', art_url: null };
@@ -57,13 +63,18 @@
     clearInterval(timer);
     const j = queue.current;
     queue.current = null;
+    if (outcome === 'success' && j.spec.kind === 'move') {
+      const g = games.find((x) => x.app_id === j.app_id);
+      g.library_root = j.spec.library;
+      g.game_path = `${j.spec.library}\\steamapps\\common\\${g.name}`;
+    }
     if (outcome === 'success' && j.spec.kind === 'backup') {
       const g = games.find((x) => x.app_id === j.app_id);
       const i = packages.findIndex((p) => p.app_id === j.app_id);
       const fresh = pkg(j.app_id, 'complete', g.build_id);
       if (i >= 0) packages[i] = fresh; else packages.push(fresh);
     }
-    emit('job-finished', { id: j.id, kind: j.spec.kind, app_id: j.app_id, title: j.title, outcome, message: outcome === 'success' ? 'Backup complete and verified.' : 'Stopped. Everything copied so far is kept.', files: 1, bytes: 1 });
+    emit('job-finished', { id: j.id, kind: j.spec.kind, app_id: j.app_id, title: j.title, outcome, message: outcome === 'success' ? (j.spec.kind === 'move' ? `Moved to ${j.spec.library}. Start Steam - it will find the game there.` : 'Backup complete and verified.') : 'Stopped. Everything copied so far is kept.', files: 1, bytes: 1 });
     emit('queue', JSON.parse(JSON.stringify(queue)));
     setTimeout(startNext, 300);
   }

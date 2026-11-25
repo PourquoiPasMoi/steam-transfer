@@ -49,6 +49,7 @@ const S = {
   binder: null,          // backup destination scan
   pkgByApp: {},
   restore: { binder: null, library: null, installed: {}, libraries: [], binders: [], loaded: false },
+  move: { from: null, to: null, installed: {}, libraries: [] },
   steamRunning: false,
   queue: { current: null, pending: [] },
   progress: null,
@@ -128,12 +129,30 @@ function restoreItems() {
   });
 }
 
+function moveItems() {
+  const m = S.move;
+  if (!m.from) return [];
+  return S.games.filter((g) => samePath(g.library_root, m.from)).map((g) => {
+    const job = jobState((s) => s.kind === 'move' && s.app_id === g.app_id);
+    let state;
+    if (job?.busy) state = 'busy';
+    else if (job?.queued) state = 'queued';
+    else if (m.installed[g.app_id]?.moving) state = 'resume';
+    else state = 'new';
+    return { key: `m-${g.app_id}`, app_id: g.app_id, name: g.name, size: g.size_on_disk, art: g.art_url, state, job, game: g };
+  });
+}
+
 const FILTERS = {
   backup: [
     ['all', 'All', () => true],
     ['new', 'Not backed up', (i) => i.state === 'new'],
     ['done', 'Backed up', (i) => i.state === 'done'],
     ['attention', 'Needs update', (i) => i.state === 'update' || i.state === 'resume'],
+  ],
+  move: [
+    ['all', 'All', () => true],
+    ['attention', 'Unfinished', (i) => i.state === 'resume'],
   ],
   restore: [
     ['all', 'All', () => true],
@@ -144,7 +163,7 @@ const FILTERS = {
 };
 
 function allItems() {
-  return S.mode === 'backup' ? backupItems() : restoreItems();
+  return S.mode === 'backup' ? backupItems() : S.mode === 'restore' ? restoreItems() : moveItems();
 }
 
 function visibleItems() {
@@ -155,16 +174,18 @@ function visibleItems() {
 
 const STICKERS = {
   backup: { done: ['BACKED UP ✓', 'done'], update: ['UPDATE', 'update'], resume: ['UNFINISHED', 'resume'] },
+  move: { resume: ['UNFINISHED', 'resume'] },
   restore: { done: ['INSTALLED ✓', 'done'], update: ['UPDATE', 'update'], resume: ['UNFINISHED', 'resume'], newer: ['PC NEWER', 'muted'], broken: ['INCOMPLETE', 'muted'] },
 };
 const ACTIONS = {
   backup: { new: 'Back up →', resume: 'Resume →', update: 'Update →', done: 'Details' },
+  move: { new: 'Move →', resume: 'Resume →' },
   restore: { new: 'Restore →', resume: 'Resume →', update: 'Update →', done: 'Details', newer: 'Details', broken: 'Unfinished' },
 };
 
 function stickerFor(item) {
   if (item.state === 'busy') {
-    const verb = item.job.kind === 'verify' ? 'CHECKING' : item.job.kind === 'restore' ? 'RESTORING' : 'COPYING';
+    const verb = { verify: 'CHECKING', restore: 'RESTORING', move: 'MOVING' }[item.job.kind] || 'COPYING';
     return [verb, 'busy'];
   }
   if (item.state === 'queued') return [`QUEUED #${item.job.queued}`, 'queued'];
@@ -428,6 +449,9 @@ function emptyState(items) {
   if (S.loading) return h('div', { class: 'page-empty' }, h('div', { class: 'note' }, h('h3', {}, 'Flipping through your library…'), h('p', {}, 'Looking for Steam and your games.')));
   if (S.mode === 'backup') {
     if (!S.games.length) return note('No Steam games found', 'Steam Transfer couldn\'t find any installed Steam games on this PC. If Steam is installed somewhere unusual, start Steam once and press Refresh.', [h('button', { class: 'btn primary', onclick: refreshAll }, 'Refresh')]);
+  } else if (S.mode === 'move') {
+    if (S.move.libraries.length < 2) return note('You need a second Steam library', 'Moving works between Steam libraries on this PC. In Steam open Settings > Storage, use "Add Drive" to pick the other drive, then press Refresh here.', [h('button', { class: 'btn', onclick: refreshMove }, 'Refresh')]);
+    if (!items.length && !S.search && S.filter === 'all') return note('No games in this library', 'Pick another library in the From list.', []);
   } else {
     if (!S.restore.binder) return note('Where are your discs?', 'Plug in the drive that has your backups and pick it. The app looks for its "Steam Transfer" folder.', [h('button', { class: 'btn blue', onclick: chooseRestoreSource }, 'Choose backup drive')]);
     if (!S.restore.binder.packages.length) return note('This binder is empty', `There are no backups in ${S.restore.binder.root}. Back up some games on the other PC first, or pick a different drive.`, [h('button', { class: 'btn blue', onclick: chooseRestoreSource }, 'Choose another drive')]);
@@ -449,7 +473,7 @@ function sleeveEl(item, i) {
   );
   const actionLabel = item.state === 'busy' ? `${pct.toFixed(0)}%` : item.state === 'queued' ? 'Queued' : ACTIONS[S.mode][item.state];
   const action = h('button', {
-    class: `strip-action ${S.mode === 'restore' ? 'restore' : ''}`,
+    class: `strip-action ${S.mode === 'restore' ? 'restore' : S.mode === 'move' ? 'move' : ''}`,
     disabled: item.state === 'busy' || item.state === 'queued' || item.state === 'broken',
     onclick: (e) => {
       e.stopPropagation();
@@ -501,7 +525,7 @@ function renderLocation() {
   loc.replaceChildren();
   if (S.mode === 'backup') {
     if (!S.binder) {
-      loc.append(
+      appendAll(loc,
         h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Back up to'),
           h('button', { class: 'btn primary', onclick: chooseDestination }, 'Choose a backup drive…')),
         h('div', { class: 'loc-stats' }, h('span', {}, h('b', {}, S.games.length), ' games on this PC')),
@@ -510,7 +534,7 @@ function renderLocation() {
     }
     const items = backupItems();
     const count = (st) => items.filter((i) => i.state === st).length;
-    loc.append(
+    appendAll(loc,
       h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Back up to'),
         driveEl(S.binder.root, S.binder.free_bytes, S.binder.free_bytes == null),
         h('button', { class: 'btn', onclick: chooseDestination }, 'Change'),
@@ -521,21 +545,21 @@ function renderLocation() {
         count('update') ? h('span', {}, h('b', {}, count('update')), ' need update') : null,
         count('resume') ? h('span', {}, h('b', {}, count('resume')), ' unfinished') : null),
     );
-  } else {
+  } else if (S.mode === 'restore') {
     const r = S.restore;
     const sourceOptions = [...new Set([...(r.binder ? [r.binder.root] : []), ...r.binders.map((b) => b.path)])];
     const sourceSel = h('select', { class: 'select', onchange: (e) => e.target.value === '__browse' ? chooseRestoreSource() : loadRestoreSource(e.target.value) },
       ...sourceOptions.map((p) => h('option', { value: p, selected: r.binder && p === r.binder.root }, p)),
       h('option', { value: '__browse' }, 'Browse…'));
-    const libOptions = [...new Set([...(r.library ? [r.library] : []), ...r.libraries.map((l) => l.path)])];
+    const libOptions = uniquePaths([...(r.library ? [r.library] : []), ...r.libraries.map((l) => l.path)]);
     const libSel = h('select', { class: 'select', onchange: (e) => e.target.value === '__browse' ? chooseRestoreTarget() : setRestoreTarget(e.target.value) },
-      ...libOptions.map((p) => h('option', { value: p, selected: p === r.library }, p)),
+      ...libOptions.map((p) => h('option', { value: p, selected: samePath(p, r.library) }, p)),
       h('option', { value: '__browse' }, 'Browse…'));
     const items = restoreItems();
-    loc.append(
+    appendAll(loc,
       h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'From'),
         sourceOptions.length ? sourceSel : h('button', { class: 'btn blue', onclick: chooseRestoreSource }, 'Choose backup drive…')),
-      h('span', { class: 'arrow' }, '→'),
+      arrowEl(),
       h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Into'),
         libOptions.length ? libSel : h('button', { class: 'btn', onclick: chooseRestoreTarget }, 'Choose Steam library…'),
         h('button', { class: 'btn ghost', onclick: refreshRestore, title: 'Rescan' }, '↻')),
@@ -544,7 +568,48 @@ function renderLocation() {
         h('span', {}, h('b', {}, items.length), ' discs'),
         h('span', {}, h('b', {}, items.filter((i) => i.state === 'done' || i.state === 'newer').length), ' installed')),
     );
+  } else {
+    const m = S.move;
+    const libs = m.libraries;
+    if (libs.length < 2) {
+      appendAll(loc,
+        h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Move between'), h('span', { class: 'drive-free' }, `${libs.length} Steam library found`)),
+        h('button', { class: 'btn ghost', onclick: refreshMove, title: 'Rescan' }, '↻ Refresh'));
+      return;
+    }
+    const countIn = (lib) => S.games.filter((g) => samePath(g.library_root, lib)).length;
+    const fromSel = h('select', { class: 'select', onchange: (e) => setMoveFrom(e.target.value) },
+      ...libs.map((l) => h('option', { value: l.path, selected: samePath(l.path, m.from) }, `${l.path}  (${countIn(l.path)} games)`)));
+    const toSel = h('select', { class: 'select', onchange: (e) => setMoveTo(e.target.value) },
+      ...libs.filter((l) => !samePath(l.path, m.from)).map((l) => h('option', { value: l.path, selected: samePath(l.path, m.to) }, `${l.path}  (${fmtBytes(l.free_bytes)} free)`)));
+    const items = moveItems();
+    appendAll(loc,
+      h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'From'), fromSel),
+      arrowEl(),
+      h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Into'), toSel,
+        h('button', { class: 'btn ghost', onclick: refreshMove, title: 'Rescan' }, '↻')),
+      S.steamRunning ? h('div', { class: 'warn' }, '⚠ Steam is running. Exit it (tray icon too) before moving.') : null,
+      h('div', { class: 'loc-stats' }, h('span', {}, h('b', {}, items.length), ' games in this library')),
+    );
   }
+}
+
+/** append() turns null into the text "null", so drop empty slots first. */
+function appendAll(parent, ...children) {
+  parent.append(...children.filter((c) => c != null && c !== false));
+}
+
+function arrowEl() {
+  const span = h('span', { class: 'arrow', 'aria-hidden': 'true' });
+  span.innerHTML = '<svg viewBox="0 0 26 12"><path d="M1 6h22M18 1.5 23 6l-5 4.5"/></svg>';
+  return span;
+}
+
+const samePath = (a, b) => !!a && !!b && a.replace(/[\\/]+$/, '').toLowerCase() === b.replace(/[\\/]+$/, '').toLowerCase();
+function uniquePaths(paths) {
+  const out = [];
+  for (const p of paths) if (p && !out.some((q) => samePath(p, q))) out.push(p);
+  return out;
 }
 
 function progressPct(p) {
@@ -562,7 +627,7 @@ function renderDeck() {
     const gameItem = { app_id: cur.app_id, art: artFor(cur.app_id) };
     tray.style.backgroundImage = artSources(gameItem).map((s) => `url("${s}")`).join(', ');
     tray.classList.add('loaded', 'spinning');
-    const verb = { backup: 'BACKING UP', restore: 'RESTORING', verify: 'CHECKING' }[cur.spec.kind];
+    const verb = { backup: 'BACKING UP', restore: 'RESTORING', verify: 'CHECKING', move: 'MOVING' }[cur.spec.kind];
     $('#lcdTitle').textContent = `${verb}  ${cur.title}`;
     const pct = progressPct(p);
     $('#lcdPct').textContent = p ? `${pct.toFixed(1)}%` : '';
@@ -594,7 +659,7 @@ function renderDeck() {
       $('#lcdTitle').textContent = 'READY';
       $('#lcdPct').textContent = '';
       $('#lcdFill').style.width = '0%';
-      $('#lcdStats').textContent = S.mode === 'backup' ? 'PICK A GAME TO BACK IT UP' : 'PICK A DISC TO RESTORE IT';
+      $('#lcdStats').textContent = { backup: 'PICK A GAME TO BACK IT UP', restore: 'PICK A DISC TO RESTORE IT', move: 'PICK A GAME TO MOVE IT' }[S.mode];
     }
     $('#lcdEta').textContent = '';
     $('#lcdFile').textContent = '';
@@ -632,7 +697,7 @@ function renderProgress() {
   const cur = S.queue.current;
   if (!cur) return;
   const pct = progressPct(S.progress);
-  const key = (cur.spec.kind === 'restore' ? 'r-' : 'b-') + cur.app_id;
+  const key = ({ restore: 'r-', move: 'm-' }[cur.spec.kind] || 'b-') + cur.app_id;
   const sleeve = document.querySelector(`.sleeve[data-key="${CSS.escape(key)}"]`);
   if (sleeve) {
     sleeve.querySelector('.ring')?.style.setProperty('--p', pct);
@@ -673,6 +738,23 @@ function openCase(item) {
     if (item.state === 'busy') actions.push(h('button', { class: 'btn danger', onclick: () => { closeModal(); call('cancel_job', { id: item.job.id }); } }, 'Stop'));
     if (item.state === 'queued') actions.push(h('button', { class: 'btn', onclick: () => { closeModal(); call('cancel_job', { id: item.job.id }); } }, 'Remove from queue'));
     if (p) actions.push(h('button', { class: 'btn', onclick: () => call('open_folder', { path: p.path }).catch(showError) }, 'Open backup folder'));
+    actions.push(h('button', { class: 'btn', onclick: () => call('open_folder', { path: g.game_path }).catch(showError) }, 'Open game folder'));
+  } else if (S.mode === 'move') {
+    const g = item.game;
+    const target = S.move.libraries.find((l) => samePath(l.path, S.move.to));
+    add('Size', fmtBytes(g.size_on_disk));
+    add('Now in', g.library_root);
+    add('Move to', S.move.to || 'choose a library');
+    if (target) add('Free there', fmtBytes(target.free_bytes), target.free_bytes < g.size_on_disk ? 'warn-text' : 'good');
+    if (!g.fully_installed) add('Steam says', 'An update is pending: let Steam finish it first', 'warn-text');
+    explain = {
+      new: 'Copies the game, its Workshop items and its shader cache to the other library and checks every file. Then it hands the game over to Steam there and removes the old copy. Steam must be closed. On the same drive it is an instant rename.',
+      resume: 'A move was interrupted. The game still lives in its original library; resuming keeps the files already copied.',
+      busy: 'Moving right now.',
+      queued: 'Waiting for the current transfer to finish.',
+    }[item.state];
+    if (primary) actions.push(h('button', { class: 'btn move', onclick: () => { closeModal(); primaryAction(item); } }, primary));
+    if (item.state === 'busy') actions.push(h('button', { class: 'btn danger', onclick: () => { closeModal(); call('cancel_job', { id: item.job.id }); } }, 'Stop'));
     actions.push(h('button', { class: 'btn', onclick: () => call('open_folder', { path: g.game_path }).catch(showError) }, 'Open game folder'));
   } else {
     const p = item.pkg, inst = item.inst;
@@ -722,12 +804,14 @@ function primaryLabel(item) {
     if (!S.binder && ['new', 'resume', 'update'].includes(item.state)) return 'Choose drive & back up';
     return { new: 'Back up', resume: 'Resume backup', update: 'Update backup' }[item.state] || null;
   }
+  if (S.mode === 'move') return { new: S.move.to ? `Move to ${S.move.to}` : 'Move', resume: 'Resume move' }[item.state] || null;
   return { new: 'Restore to PC', resume: 'Resume restore', update: 'Update on PC' }[item.state] || null;
 }
 
 // ------------------------------------------------------------------------------------------ actions
 
 async function primaryAction(item, force) {
+  if (S.mode === 'move') return moveAction(item);
   if (S.mode === 'backup') {
     if (!S.binder) {
       const ok = await chooseDestination();
@@ -746,6 +830,31 @@ async function primaryAction(item, force) {
     return dialog('Close Steam first', 'Steam is running. Exit it completely, including the icon in the system tray (right-click it and choose Exit Steam), then try again.\n\nThis stops Steam from overwriting the game\'s install record while it is being restored.', [['OK', 'primary']]);
   }
   return enqueue({ kind: 'restore', package: item.pkg.path, library: S.restore.library }, item.name, item.app_id);
+}
+
+async function moveAction(item) {
+  const m = S.move;
+  if (!['new', 'resume'].includes(item.state)) return openCase(item);
+  if (!m.to) return toast('Pick a library', 'Choose which Steam library to move the game into.', '');
+  S.steamRunning = await call('steam_running').catch(() => false);
+  if (S.steamRunning) {
+    renderLocation();
+    return dialog('Close Steam first', 'Steam is running. Exit it completely, including the icon in the system tray (right-click it and choose Exit Steam), then try again.\n\nSteam has to be closed so it finds the game in its new library when it starts.', [['OK', 'primary']]);
+  }
+  if (!item.game.fully_installed) {
+    return dialog('Let Steam finish first', `Steam has an update or download waiting for ${item.name}. Start Steam, let it finish, exit Steam, then move the game.`, [['OK', 'primary']]);
+  }
+  const target = m.libraries.find((l) => samePath(l.path, m.to));
+  const sameDrive = item.game.library_root.slice(0, 2).toLowerCase() === m.to.slice(0, 2).toLowerCase();
+  const choice = await dialog(`Move ${item.name}?`,
+    `From:  ${item.game.library_root}\nTo:  ${m.to}${target ? `  (${fmtBytes(target.free_bytes)} free)` : ''}\n\n` +
+    (sameDrive
+      ? 'Both libraries are on the same drive, so this is instant.'
+      : `About ${fmtBytes(item.size)} will be copied and checked. The old copy is deleted only after everything is verified.`) +
+    '\n\nKeep Steam closed until it finishes.',
+    [['Cancel', ''], ['Move', 'primary', 'move']]);
+  if (choice !== 'move') return;
+  return enqueue({ kind: 'move', app_id: item.app_id, library: m.to }, item.name, item.app_id);
 }
 
 function enqueueVerify(item) {
@@ -841,6 +950,7 @@ async function refreshRestore() {
   r.libraries = libs;
   r.binders = binders;
   if (!r.library) r.library = S.settings.restore_target || libs[0]?.path || null;
+  r.library = libs.find((l) => samePath(l.path, r.library))?.path || r.library;
   const source = r.binder?.root || S.settings.restore_source || binders[0]?.path || S.settings.destination;
   if (source) {
     try { r.binder = await call('scan_binder', { path: source }); } catch (e) { showError(e); }
@@ -851,6 +961,42 @@ async function refreshRestore() {
   renderAll();
 }
 
+async function refreshMove() {
+  const m = S.move;
+  const libs = await call('list_libraries').catch(() => []);
+  m.libraries = libs;
+  const fix = (p) => libs.find((l) => samePath(l.path, p))?.path || null;
+  const gamesIn = (lib) => S.games.filter((g) => samePath(g.library_root, lib)).length;
+  m.from = fix(m.from) || fix(S.settings.move_from) || libs.slice().sort((a, b) => gamesIn(b.path) - gamesIn(a.path))[0]?.path || null;
+  m.to = fix(m.to) || fix(S.settings.move_to);
+  if (!m.to || samePath(m.to, m.from)) m.to = libs.find((l) => !samePath(l.path, m.from))?.path || null;
+  await loadMoveState();
+  S.steamRunning = await call('steam_running').catch(() => false);
+  renderAll();
+}
+
+async function loadMoveState() {
+  S.move.installed = S.move.to ? await call('library_state', { library: S.move.to }).catch(() => ({})) : {};
+}
+
+async function setMoveFrom(path) {
+  S.move.from = path;
+  S.settings.move_from = path;
+  if (samePath(S.move.to, path)) S.move.to = S.move.libraries.find((l) => !samePath(l.path, path))?.path || null;
+  saveSettings();
+  S.spread = 0;
+  await loadMoveState();
+  renderAll();
+}
+
+async function setMoveTo(path) {
+  S.move.to = path;
+  S.settings.move_to = path;
+  saveSettings();
+  await loadMoveState();
+  renderAll();
+}
+
 async function setMode(mode) {
   if (S.mode === mode) return;
   S.mode = mode;
@@ -858,6 +1004,7 @@ async function setMode(mode) {
   S.spread = 0;
   renderAll();
   if (mode === 'restore') await refreshRestore();
+  if (mode === 'move') await refreshMove();
 }
 
 // ------------------------------------------------------------------------------------------ modal, dialog, toast
@@ -1048,12 +1195,16 @@ async function bindEvents() {
   await S.api.listen('job-finished', async (e) => {
     const r = e.payload;
     S.lastResult = { ...r, at: Date.now() };
-    const kindWord = { backup: 'Backup', restore: 'Restore', verify: 'Check' }[r.kind];
+    const kindWord = { backup: 'Backup', restore: 'Restore', verify: 'Check', move: 'Move' }[r.kind];
     if (r.outcome === 'success') toast(`${r.title} ✓`, r.message, 'ok');
     else if (r.outcome === 'cancelled') toast(`${kindWord} stopped`, `${r.title}: ${r.message}`, '');
     else toast(`${kindWord} failed: ${r.title}`, r.message, 'err');
     if (r.kind === 'restore') await loadInstalled();
-    else await loadBinder();
+    else if (r.kind === 'move') {
+      await loadGames();
+      S.move.libraries = await call('list_libraries').catch(() => S.move.libraries);
+      await loadMoveState();
+    } else await loadBinder();
     renderAll();
   });
 }
@@ -1084,7 +1235,7 @@ async function main() {
   renderAll();
 
   setInterval(async () => {
-    if (S.mode !== 'restore') return;
+    if (S.mode === 'backup') return;
     const running = await call('steam_running').catch(() => false);
     if (running !== S.steamRunning) { S.steamRunning = running; renderLocation(); }
   }, 4000);

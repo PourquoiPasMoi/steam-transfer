@@ -92,10 +92,13 @@ struct DriveDto {
     free_bytes: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct InstalledDto {
     build_id: String,
+    /// an unfinished restore into this library
     partial: bool,
+    /// an unfinished move into this library
+    moving: bool,
 }
 
 #[derive(Serialize)]
@@ -197,13 +200,16 @@ async fn library_state(library: String) -> CmdResult<HashMap<String, InstalledDt
         let library = PathBuf::from(library);
         let mut map: HashMap<String, InstalledDto> = steam::scan_library(&library)
             .into_iter()
-            .map(|g| (g.app_id.clone(), InstalledDto { build_id: g.build_id, partial: false }))
+            .map(|g| (g.app_id.clone(), InstalledDto { build_id: g.build_id, ..Default::default() }))
             .collect();
         if let Ok(entries) = std::fs::read_dir(library.join("steamapps")) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Some(id) = name.strip_prefix("steamtransfer-restore-").and_then(|n| n.strip_suffix(".inprogress")) {
-                    map.entry(id.to_string()).or_insert(InstalledDto { build_id: String::new(), partial: true }).partial = true;
+                    map.entry(id.to_string()).or_default().partial = true;
+                }
+                if let Some(id) = name.strip_prefix("steamtransfer-move-").and_then(|n| n.strip_suffix(".inprogress")) {
+                    map.entry(id.to_string()).or_default().moving = true;
                 }
             }
         }

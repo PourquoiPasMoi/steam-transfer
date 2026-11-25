@@ -13,6 +13,9 @@ pub struct Settings {
     pub restore_source: Option<String>,
     /// Steam library to restore into.
     pub restore_target: Option<String>,
+    /// Last libraries used on the Move tab.
+    pub move_from: Option<String>,
+    pub move_to: Option<String>,
     /// Check GitHub for a new version at startup.
     pub auto_update_check: Option<bool>,
 }

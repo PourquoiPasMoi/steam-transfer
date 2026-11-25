@@ -153,6 +153,19 @@ pub fn remove_file_force(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Delete a folder and everything in it, including read-only files. Links/junctions are removed, not followed.
+pub fn delete_tree(root: &Path) -> io::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut files = Vec::new();
+    list_tree(root, root, &mut files)?;
+    for file in files {
+        remove_file_force(&file.src)?;
+    }
+    fs::remove_dir_all(root)
+}
+
 /// True when the destination already holds this exact file (same size and modified time).
 pub fn is_same(job: &FileJob) -> bool {
     match fs::metadata(&job.dst) {

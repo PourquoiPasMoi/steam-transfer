@@ -23,6 +23,8 @@ pub enum JobSpec {
     Restore { package: PathBuf, library: PathBuf },
     /// Byte-for-byte comparison of the installed game and its backup.
     Verify { app_id: String, binder: PathBuf },
+    /// Move an installed game to another Steam library on this PC.
+    Move { app_id: String, library: PathBuf },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,6 +165,10 @@ fn run_job(app: &AppHandle, job: &QueuedJob, cancel: &AtomicBool) -> JobResult {
         JobSpec::Verify { app_id, binder } => {
             result.kind = "verify".into();
             run_verify(app_id, binder, &ctx, &mut result)
+        }
+        JobSpec::Move { app_id, library } => {
+            result.kind = "move".into();
+            run_move(app_id, library, &ctx, &mut result)
         }
     };
     match outcome {
@@ -479,6 +485,190 @@ pub(crate) fn restore_package(package_path: &Path, library: &Path, ctx: &Ctx, re
     outcome
 }
 
+/// Marker in the target library while a move is unfinished. Until the move completes the game
+/// still belongs to its original library, so Steam keeps working whatever happens.
+pub fn move_marker(library: &Path, app_id: &str) -> PathBuf {
+    library.join("steamapps").join(format!("steamtransfer-move-{app_id}.inprogress"))
+}
+
+fn same_volume(a: &Path, b: &Path) -> bool {
+    let root = |p: &Path| p.components().next().map(|c| c.as_os_str().to_string_lossy().to_uppercase());
+    root(a).is_some() && root(a) == root(b)
+}
+
+/// Everything Steam keeps for one game inside a library: the game folder (required),
+/// its Workshop items and its shader cache (moved so Steam doesn't download/rebuild them).
+fn move_parts(game: &Game, target: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let src = game.library_root.join("steamapps");
+    let dst = target.join("steamapps");
+    let id = &game.app_id;
+    vec![
+        (game.game_path.clone(), dst.join("common").join(&game.install_dir)),
+        (src.join("workshop").join("content").join(id), dst.join("workshop").join("content").join(id)),
+        (src.join("shadercache").join(id), dst.join("shadercache").join(id)),
+    ]
+}
+
+fn move_log() -> Box<dyn Write> {
+    match std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("SteamTransfer")) {
+        Some(dir) if fs::create_dir_all(&dir).is_ok() => open_log(&dir.join("move-log.txt")),
+        _ => Box::new(std::io::sink()),
+    }
+}
+
+fn run_move(app_id: &str, library: &Path, ctx: &Ctx, result: &mut JobResult) -> StopResult<()> {
+    if sys::steam_running() {
+        return Err(Stop::Failed("Steam is running. Exit Steam completely (including the tray icon) before moving a game, so it doesn't keep using the old location.".into()));
+    }
+    let game = find_game(app_id)?;
+    move_game(&game, library, false, ctx, result)
+}
+
+/// Move a game to another Steam library. Order matters so Steam is never left without a valid install:
+/// 1. copy (or rename, on the same drive) the files into the target library and verify them,
+/// 2. put the manifest in the target library, 3. remove the old manifest, 4. delete the old files.
+pub(crate) fn move_game(game: &Game, target: &Path, force_copy: bool, ctx: &Ctx, result: &mut JobResult) -> StopResult<()> {
+    if !game.fully_installed() {
+        return Err(Stop::Failed("Steam has an update or download waiting for this game. Let Steam finish it first, then move the game.".into()));
+    }
+    let src_apps = game.library_root.join("steamapps");
+    let dst_apps = target.join("steamapps");
+    if !dst_apps.is_dir() {
+        return Err(Stop::Failed(format!("{} is not a Steam library. Add it in Steam > Settings > Storage first.", target.display())));
+    }
+    if inside(&game.library_root, target) && inside(target, &game.library_root) {
+        return Err(Stop::Failed("The game is already in that library.".into()));
+    }
+    let manifest_name = game.manifest_path.file_name().unwrap_or_default().to_os_string();
+    let dst_manifest = dst_apps.join(&manifest_name);
+    let marker = move_marker(target, &game.app_id);
+    let resuming = marker.exists();
+    let parts = move_parts(game, target);
+    let dst_game = parts[0].1.clone();
+    if dst_manifest.exists() && !resuming {
+        return Err(Stop::Failed("That library already has a Steam install record for this game. Uninstall it there in Steam first.".into()));
+    }
+    let dst_has_files = fs::read_dir(&dst_game).map(|mut d| d.next().is_some()).unwrap_or(false);
+    if dst_has_files && !resuming {
+        return Err(Stop::Failed(format!(
+            "{} already exists. Rename or delete that folder first so the two copies don't get mixed up.",
+            dst_game.display()
+        )));
+    }
+    if inside(&dst_game, &game.game_path) || inside(&game.game_path, &dst_game) {
+        return Err(Stop::Failed("The target folder overlaps the game's current folder.".into()));
+    }
+
+    let mut log = move_log();
+    let _ = writeln!(log, "============================================================");
+    let _ = writeln!(log, "Move started: {}  {} (App {}) build {}", now_string(), game.name, game.app_id, game.build_id);
+    let _ = writeln!(log, "From: {}", game.library_root.display());
+    let _ = writeln!(log, "To:   {}", target.display());
+    let _ = fs::write(&marker, now_string());
+
+    let rename = !force_copy && same_volume(&game.library_root, target) && !dst_game.exists();
+    let outcome = (|| -> StopResult<()> {
+        if rename {
+            // Same drive: moving folders is instant and needs no extra space.
+            (ctx.progress)(&Progress { stage: "Moving".into(), file: game.install_dir.clone(), ..Default::default() });
+            fs::create_dir_all(dst_apps.join("common"))?;
+            fs::rename(&game.game_path, &dst_game).map_err(|e| Stop::Failed(format!("Could not move the game folder: {e}")))?;
+            for (src, dst) in &parts[1..] {
+                if src.is_dir() && !dst.exists() {
+                    if let Some(parent) = dst.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::rename(src, dst);
+                }
+            }
+            let (files, bytes) = engine::measure(&dst_game);
+            result.files = files;
+            result.bytes = bytes;
+            let _ = writeln!(log, "RENAMED on the same drive: {files} files");
+        } else {
+            let mut game_jobs = Vec::new();
+            engine::list_tree(&game.game_path, &dst_game, &mut game_jobs).map_err(|e| Stop::Failed(format!("Could not read the game folder: {e}")))?;
+            let mut extra = Vec::new();
+            for (src, dst) in &parts[1..] {
+                let _ = engine::list_tree(src, dst, &mut extra);
+            }
+            if dst_game.is_dir() {
+                engine::clean_partials(&dst_game);
+                // only our own unfinished copy can be here (checked above), so make it an exact mirror
+                engine::mirror_deletions(&dst_game, &game_jobs)?;
+            }
+            let mut all = game_jobs.clone();
+            all.extend(extra);
+            ensure_space(&dst_apps, engine::bytes_needed(&all))?;
+            let stats = engine::copy_jobs(&all, ctx, "Moving", &mut log)?;
+            ctx.check()?;
+            (ctx.progress)(&Progress { stage: "Verifying".into(), ..Default::default() });
+            engine::verify_sizes(&all)?;
+            let src_files = game_jobs.len() as u64;
+            let src_bytes: u64 = game_jobs.iter().map(|j| j.len).sum();
+            if engine::measure(&dst_game) != (src_files, src_bytes) {
+                return Err(Stop::Failed("Verification failed: the copy doesn't match the original. Nothing was removed.".into()));
+            }
+            result.copied_files = stats.copied_files;
+            result.copied_bytes = stats.copied_bytes;
+            result.files = src_files;
+            result.bytes = src_bytes;
+        }
+
+        // Hand the game over to the target library.
+        fs::copy(&game.manifest_path, &dst_manifest).map_err(|e| Stop::Failed(format!("Could not write the Steam manifest: {e}")))?;
+        let workshop_acf = format!("appworkshop_{}.acf", game.app_id);
+        let src_ws = src_apps.join("workshop").join(&workshop_acf);
+        if src_ws.is_file() {
+            let _ = fs::create_dir_all(dst_apps.join("workshop"));
+            let _ = fs::copy(&src_ws, dst_apps.join("workshop").join(&workshop_acf));
+        }
+        if let Err(e) = engine::remove_file_force(&game.manifest_path) {
+            // Never leave two libraries claiming the same game.
+            let _ = fs::remove_file(&dst_manifest);
+            return Err(Stop::Failed(format!("Could not remove the old Steam manifest ({e}). The game stays in its original library.")));
+        }
+        let _ = engine::remove_file_force(&src_ws);
+        let _ = fs::remove_file(&marker);
+        let _ = writeln!(log, "HANDED OVER at {}", now_string());
+
+        if !rename {
+            (ctx.progress)(&Progress { stage: "Removing the old copy".into(), ..Default::default() });
+            let mut leftovers = Vec::new();
+            for (src, _) in &parts {
+                if let Err(e) = engine::delete_tree(src) {
+                    leftovers.push(format!("{} ({e})", src.display()));
+                }
+            }
+            if !leftovers.is_empty() {
+                let _ = writeln!(log, "LEFTOVERS: {}", leftovers.join("; "));
+                result.message = format!(
+                    "Moved to {}. Some old files couldn't be deleted - you can remove them by hand: {}",
+                    target.display(),
+                    leftovers.join("; ")
+                );
+                return Ok(());
+            }
+        }
+        result.message = format!("Moved to {}. Start Steam - it will find the game there.", target.display());
+        Ok(())
+    })();
+
+    match &outcome {
+        Ok(()) => {
+            let _ = writeln!(log, "SUCCESS at {}", now_string());
+        }
+        Err(Stop::Cancelled) => {
+            let _ = writeln!(log, "CANCELLED at {} - the game is still in its original library", now_string());
+        }
+        Err(Stop::Failed(msg)) => {
+            let _ = writeln!(log, "FAILED at {}: {msg}", now_string());
+        }
+    }
+    let _ = log.flush();
+    outcome
+}
+
 fn run_verify(app_id: &str, binder: &Path, ctx: &Ctx, result: &mut JobResult) -> StopResult<()> {
     let game = find_game(app_id)?;
     let pkg = package::find_package(binder, &game);
@@ -600,6 +790,126 @@ mod tests {
         let mut r = JobResult::default();
         assert!(matches!(restore_package(&pkg_path, &new_pc, &ctx, &mut r), Err(Stop::Failed(_))));
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn library_with_game(root: &Path, name: &str) -> PathBuf {
+        let lib = root.join(name);
+        manifest(&lib, "100");
+        let apps = lib.join("steamapps");
+        write(&apps.join("common").join("Test Game").join("game.exe"), b"exe");
+        write(&apps.join("common").join("Test Game").join("data").join("big.pak"), &vec![3u8; 20_000]);
+        write(&apps.join("workshop").join("content").join("424242").join("mod1").join("mod.bin"), b"mod");
+        write(&apps.join("workshop").join("appworkshop_424242.acf"), b"\"AppWorkshop\" {}");
+        write(&apps.join("shadercache").join("424242").join("cache.bin"), b"shader");
+        lib
+    }
+
+    fn assert_moved(from: &Path, to: &Path) {
+        let src = from.join("steamapps");
+        let dst = to.join("steamapps");
+        // the game, its manifest, workshop items and shader cache live in the new library...
+        assert_eq!(fs::read(dst.join("common").join("Test Game").join("game.exe")).unwrap(), b"exe");
+        assert_eq!(fs::metadata(dst.join("common").join("Test Game").join("data").join("big.pak")).unwrap().len(), 20_000);
+        assert!(dst.join("appmanifest_424242.acf").is_file());
+        assert!(dst.join("workshop").join("content").join("424242").join("mod1").join("mod.bin").is_file());
+        assert!(dst.join("workshop").join("appworkshop_424242.acf").is_file());
+        assert!(dst.join("shadercache").join("424242").join("cache.bin").is_file());
+        assert!(!move_marker(to, "424242").exists());
+        // ...and nothing is left behind, so Steam sees exactly one install
+        assert!(!src.join("appmanifest_424242.acf").exists());
+        assert!(!src.join("common").join("Test Game").exists());
+        assert!(!src.join("workshop").join("content").join("424242").exists());
+        assert!(!src.join("workshop").join("appworkshop_424242.acf").exists());
+        assert!(!src.join("shadercache").join("424242").exists());
+        // Steam reads the moved manifest exactly as before
+        let moved = crate::steam::scan_library(to);
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].app_id, "424242");
+        assert!(crate::steam::scan_library(from).is_empty());
+    }
+
+    fn ctx_parts() -> (AtomicBool, impl Fn(&Progress) + Sync) {
+        (AtomicBool::new(false), |_: &Progress| {})
+    }
+
+    #[test]
+    fn move_between_drives_copies_verifies_then_removes() {
+        let root = std::env::temp_dir().join(format!("steam-transfer-move-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let from = library_with_game(&root, "lib-c");
+        let to = root.join("lib-e");
+        fs::create_dir_all(to.join("steamapps")).unwrap();
+        let (cancel, progress) = ctx_parts();
+        let ctx = Ctx { cancel: &cancel, progress: &progress };
+
+        let mut r = JobResult::default();
+        move_game(&game(&from), &to, true, &ctx, &mut r).ok().unwrap();
+        assert_eq!(r.files, 2);
+        assert_moved(&from, &to);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_on_same_drive_renames_instantly() {
+        let root = std::env::temp_dir().join(format!("steam-transfer-move-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let from = library_with_game(&root, "lib-a");
+        let to = root.join("lib-b");
+        fs::create_dir_all(to.join("steamapps")).unwrap();
+        let (cancel, progress) = ctx_parts();
+        let ctx = Ctx { cancel: &cancel, progress: &progress };
+
+        let mut r = JobResult::default();
+        move_game(&game(&from), &to, false, &ctx, &mut r).ok().unwrap();
+        assert_eq!(r.copied_files, 0, "same drive must rename, not copy");
+        assert_moved(&from, &to);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn interrupted_move_keeps_the_original_and_resumes() {
+        let root = std::env::temp_dir().join(format!("steam-transfer-move-resume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let from = library_with_game(&root, "lib-c");
+        let to = root.join("lib-e");
+        fs::create_dir_all(to.join("steamapps")).unwrap();
+
+        // a cancelled move leaves the original untouched and Steam still sees it there
+        let cancel = AtomicBool::new(true);
+        let progress = |_: &Progress| {};
+        let ctx = Ctx { cancel: &cancel, progress: &progress };
+        let mut r = JobResult::default();
+        assert!(matches!(move_game(&game(&from), &to, true, &ctx, &mut r), Err(Stop::Cancelled)));
+        assert!(from.join("steamapps").join("appmanifest_424242.acf").is_file());
+        assert!(from.join("steamapps").join("common").join("Test Game").join("game.exe").is_file());
+        assert!(!to.join("steamapps").join("appmanifest_424242.acf").exists());
+        assert!(move_marker(&to, "424242").exists());
+
+        // simulate a half-copied file from the interruption, then resume
+        write(&to.join("steamapps").join("common").join("Test Game").join("game.exe"), b"exe");
+        write(&to.join("steamapps").join("common").join("Test Game").join("data").join("big.pak.steamtransfer-part"), b"half");
+        let (cancel, progress) = ctx_parts();
+        let ctx = Ctx { cancel: &cancel, progress: &progress };
+        let mut r = JobResult::default();
+        move_game(&game(&from), &to, true, &ctx, &mut r).ok().unwrap();
+        assert_moved(&from, &to);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_refuses_to_mix_with_an_existing_folder() {
+        let root = std::env::temp_dir().join(format!("steam-transfer-move-refuse-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let from = library_with_game(&root, "lib-c");
+        let to = root.join("lib-e");
+        write(&to.join("steamapps").join("common").join("Test Game").join("old-save.dat"), b"keep me");
+        let (cancel, progress) = ctx_parts();
+        let ctx = Ctx { cancel: &cancel, progress: &progress };
+        let mut r = JobResult::default();
+        assert!(matches!(move_game(&game(&from), &to, true, &ctx, &mut r), Err(Stop::Failed(_))));
+        assert!(to.join("steamapps").join("common").join("Test Game").join("old-save.dat").is_file());
+        assert!(from.join("steamapps").join("appmanifest_424242.acf").is_file());
         let _ = fs::remove_dir_all(&root);
     }
 }
