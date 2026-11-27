@@ -51,6 +51,9 @@ pub struct TorrentDto {
     pub seeders: u32,
     pub error: Option<String>,
     pub folder: String,
+    /// Canonical lowercase hex info hash. This stays the same while a magnet moves from
+    /// fetching metadata to a managed torrent, so website cards can follow its lifecycle.
+    pub info_hash: Option<String>,
     /// cover image URL (picked by the user, included in the download, or matched on Steam)
     pub cover: Option<String>,
 }
@@ -101,6 +104,58 @@ fn magnet_name(link: &str) -> Option<String> {
         let (k, v) = kv.split_once('=')?;
         (k == "dn").then(|| covers::decode_entities(&percent_decode(&v.replace('+', " "))))
     })
+}
+
+/// Return a v1 magnet info hash as lowercase hex. Magnets commonly use either 40 hex
+/// characters or 32 base32 characters for `xt=urn:btih:...`.
+fn magnet_info_hash(link: &str) -> Option<String> {
+    let query = link.split_once('?')?.1;
+    query.split('&').find_map(|kv| {
+        let (key, value) = kv.split_once('=')?;
+        if !key.eq_ignore_ascii_case("xt") {
+            return None;
+        }
+        let value = percent_decode(value);
+        let hash = value.to_ascii_lowercase().strip_prefix("urn:btih:")?.to_string();
+        normalize_info_hash(&hash)
+    })
+}
+
+fn normalize_info_hash(hash: &str) -> Option<String> {
+    if hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(hash.to_ascii_lowercase());
+    }
+    if hash.len() != 32 {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(20);
+    let mut accumulator = 0u32;
+    let mut bits = 0u8;
+    for ch in hash.bytes() {
+        let value = match ch.to_ascii_uppercase() {
+            b'A'..=b'Z' => ch.to_ascii_uppercase() - b'A',
+            b'2'..=b'7' => ch - b'2' + 26,
+            _ => return None,
+        } as u32;
+        accumulator = (accumulator << 5) | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            decoded.push(((accumulator >> bits) & 0xff) as u8);
+            accumulator &= if bits == 0 { 0 } else { (1u32 << bits) - 1 };
+        }
+    }
+    if decoded.len() != 20 || bits != 0 {
+        return None;
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(40);
+    for byte in decoded {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Some(out)
 }
 
 fn percent_decode(s: &str) -> String {
@@ -390,6 +445,10 @@ impl Torrents {
                 seeders: 0,
                 error: p.error.clone(),
                 folder: p.folder.to_string_lossy().into_owned(),
+                info_hash: match &p.source {
+                    Source::Link(link) => magnet_info_hash(link),
+                    Source::File(_) => None,
+                },
                 cover: if p.name.ends_with('…') { None } else { self.covers.url_for(&p.name, None, false) },
             })
             .collect();
@@ -442,6 +501,7 @@ impl Torrents {
                     seeders: peer("live_seeders"),
                     error: stats.error.clone(),
                     folder: folder.to_string_lossy().into_owned(),
+                    info_hash: Some(handle.info_hash().as_string()),
                 }
             })
             .collect()
@@ -526,6 +586,18 @@ mod tests {
         );
         assert_eq!(magnet_name("magnet:?xt=urn:btih:abc"), None);
         assert_eq!(percent_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn reads_and_normalizes_magnet_info_hash() {
+        assert_eq!(
+            magnet_info_hash("magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=Example").as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(
+            magnet_info_hash("magnet:?xt=urn%3Abtih%3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").as_deref(),
+            Some("0000000000000000000000000000000000000000")
+        );
     }
 
     /// Real network test (not run by default):

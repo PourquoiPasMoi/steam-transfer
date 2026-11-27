@@ -7,6 +7,7 @@ mod steam;
 mod sys;
 mod torrent;
 mod vdf;
+mod web_library;
 
 use jobs::{JobSpec, Queue, QueueSnapshot};
 use serde::Serialize;
@@ -385,6 +386,38 @@ async fn torrent_downloading(app: AppHandle) -> CmdResult<bool> {
     Ok(torrents.downloading().await)
 }
 
+#[tauri::command]
+async fn scrape_web_library(
+    app: AppHandle,
+    url: String,
+    crawl_linked_pages: bool,
+) -> CmdResult<web_library::WebLibrary> {
+    web_library::scrape(&url, crawl_linked_pages, Some(&app)).await
+}
+
+#[tauri::command]
+async fn inspect_web_source(url: String) -> CmdResult<web_library::WebSource> {
+    web_library::inspect_source(&url).await
+}
+
+#[tauri::command]
+async fn search_web_source(
+    url: String,
+    query: String,
+) -> CmdResult<web_library::WebLibraryItem> {
+    web_library::search_source(&url, &query).await
+}
+
+#[tauri::command]
+async fn download_web_file(
+    app: AppHandle,
+    url: String,
+    folder: String,
+    name: String,
+) -> CmdResult<String> {
+    web_library::download(&app, &url, Path::new(&folder), &name).await
+}
+
 /// Test-only override for the update feed. Never passed on to the installer or the reopened app.
 pub const TEST_FEED_VAR: &str = "STEAM_TRANSFER_UPDATE_URL";
 
@@ -563,6 +596,10 @@ pub fn run() {
             torrent_set_cover,
             torrent_reset_cover,
             torrent_set_limits,
+            scrape_web_library,
+            inspect_web_source,
+            search_web_source,
+            download_web_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Steam Transfer");

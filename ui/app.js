@@ -50,7 +50,7 @@ const S = {
   pkgByApp: {},
   restore: { binder: null, library: null, installed: {}, libraries: [], binders: [], loaded: false },
   move: { from: null, to: null, installed: {}, libraries: [] },
-  dl: { list: [], dir: null, link: '', signature: '' },
+  dl: { list: [], dir: null, link: '', signature: '', libraries: [], libraryId: null, siteQuery: '' },
   steamRunning: false,
   queue: { current: null, pending: [] },
   progress: null,
@@ -146,10 +146,39 @@ function moveItems() {
 
 const TORRENT_ACTIVE = ['fetching', 'checking', 'downloading'];
 
+function activeWebLibrary() {
+  return S.dl.libraries.find((library) => library.id === S.dl.libraryId) || null;
+}
+
+function torrentArtworkSources(torrent) {
+  const hash = canonicalInfoHash(torrent.info_hash);
+  const sources = [];
+  if (hash) {
+    for (const web of S.dl.libraries.flatMap((library) => library.items || [])) {
+      if (web.image && magnetInfoHash(web.url) === hash) sources.push(web.image);
+    }
+  }
+  if (torrent.cover) sources.push(torrent.cover);
+  return [...new Set(sources)];
+}
+
 function downloadItems() {
-  return S.dl.list.map((t) => ({
-    key: `d-${t.key}`, app_id: null, name: t.name, size: t.total_bytes, art: null, state: t.state, torrent: t,
+  const torrentHashes = new Set(S.dl.list.map((torrent) => canonicalInfoHash(torrent.info_hash)).filter(Boolean));
+  const torrents = S.dl.list.map((t) => ({
+    key: `d-${t.key}`,
+    app_id: null,
+    name: t.name,
+    size: t.total_bytes,
+    art: torrentArtworkSources(t)[0] || null,
+    state: t.state,
+    torrent: t,
   }));
+  const website = (activeWebLibrary()?.items || [])
+    .filter((web) => !torrentHashes.has(magnetInfoHash(web.url)))
+    .map((web, index) => ({
+      key: `w-${index}`, app_id: null, name: web.name, size: web.total || 0, art: web.image, state: web.state || 'available', web,
+    }));
+  return [...torrents, ...website];
 }
 
 const FILTERS = {
@@ -161,8 +190,8 @@ const FILTERS = {
   ],
   download: [
     ['all', 'All', () => true],
-    ['active', 'Downloading', (i) => TORRENT_ACTIVE.includes(i.state) || i.state === 'paused'],
-    ['done', 'Done', (i) => i.state === 'seeding'],
+    ['active', 'Downloading', (i) => i.web ? i.state === 'downloading' : TORRENT_ACTIVE.includes(i.state) || i.state === 'paused'],
+    ['done', 'Done', (i) => i.state === 'seeding' || i.state === 'done'],
   ],
   move: [
     ['all', 'All', () => true],
@@ -203,6 +232,7 @@ const ACTIONS = {
 };
 
 function stickerFor(item) {
+  if (item.web) return { downloading: ['DOWNLOADING', 'busy'], added: ['ADDED ✓', 'done'], done: ['DONE ✓', 'done'], error: ['ERROR', 'error'] }[item.state] || null;
   if (item.torrent) return STICKERS.download[item.state] || null;
   if (item.state === 'busy') {
     const verb = { verify: 'CHECKING', restore: 'RESTORING', move: 'MOVING' }[item.job.kind] || 'COPYING';
@@ -215,12 +245,28 @@ function stickerFor(item) {
 // ------------------------------------------------------------------------------------------ disc art
 
 function discEl(item, cls = 'disc') {
+  if (item.web) {
+    const blank = () => h('div', { class: `${cls} blank` }, h('div', { class: 'initials dark' }, initials(item.name) || '↓'));
+    if (!item.art) return blank();
+    const disc = h('div', { class: cls });
+    const img = h('img', { alt: '', draggable: 'false', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer', src: item.art });
+    img.onerror = () => disc.replaceWith(blank());
+    disc.append(img);
+    return disc;
+  }
   if (item.torrent) {
     const blank = () => h('div', { class: `${cls} blank` }, h('div', { class: 'initials dark' }, initials(item.name) || '♪'));
-    if (!item.torrent.cover) return blank();
+    const sources = [item.art, item.torrent.cover].filter(Boolean);
+    if (!sources.length) return blank();
     const disc = h('div', { class: cls });
-    const img = h('img', { alt: '', draggable: 'false', decoding: 'async', src: item.torrent.cover });
-    img.onerror = () => disc.replaceWith(blank());
+    const img = h('img', { alt: '', draggable: 'false', decoding: 'async', referrerpolicy: 'no-referrer' });
+    let n = 0;
+    img.onerror = () => {
+      n++;
+      if (n < sources.length) img.src = sources[n];
+      else disc.replaceWith(blank());
+    };
+    img.src = sources[0];
     disc.append(img);
     return disc;
   }
@@ -479,7 +525,7 @@ function emptyState(items) {
   if (S.mode === 'backup') {
     if (!S.games.length) return note('No Steam games found', 'Steam Transfer couldn\'t find any installed Steam games on this PC. If Steam is installed somewhere unusual, start Steam once and press Refresh.', [h('button', { class: 'btn primary', onclick: refreshAll }, 'Refresh')]);
   } else if (S.mode === 'download') {
-    if (!S.dl.list.length) return note('Paste a magnet link', 'Paste a magnet link in the box above (or open a .torrent file), pick where to save it and press Download. Progress, speed and peers show up here, and unfinished downloads carry on when you reopen the app.', []);
+    if (!downloadItems().length) return note('Add a website library', 'Import a page and scan its same-site links for magnet downloads and cover images, or paste a magnet manually above.', [h('button', { class: 'btn primary', onclick: openWebsiteLibraryDialog }, '＋ Add website')]);
   } else if (S.mode === 'move') {
     if (S.move.libraries.length < 2) return note('You need a second Steam library', 'Moving works between Steam libraries on this PC. Pick the other drive and the app creates a Steam library there and adds it to Steam for you (Steam needs to be closed).', [h('button', { class: 'btn', onclick: () => newLibrary('move') }, 'New Steam library…'), h('button', { class: 'btn ghost', onclick: refreshMove }, 'Refresh')]);
     if (!items.length && !S.search && S.filter === 'all') return note('No games in this library', 'Pick another library in the From list.', []);
@@ -532,7 +578,37 @@ function torrentSleeveEl(item, i) {
       h('div', { class: 'strip-meta' }, h('span', { class: 'meta-text' }, torrentMeta(t)), action)));
 }
 
+function webPct(web) {
+  return web.total ? Math.min(100, ((web.downloaded || 0) / web.total) * 100) : 0;
+}
+
+function webSleeveEl(item, i) {
+  const web = item.web;
+  const pct = webPct(web);
+  const sticker = stickerFor(item);
+  const kind = web.kind || 'direct';
+  const actionLabel = web.state === 'downloading' ? `${pct.toFixed(0)}%` : web.state === 'added' ? 'In transfers' : web.state === 'done' ? 'Open folder' : web.state === 'error' ? 'Retry' : kind === 'magnet' ? 'Add magnet' : kind === 'torrent' ? 'Add torrent' : 'Download';
+  const action = h('button', {
+    class: 'strip-action download',
+    disabled: web.state === 'downloading' || web.state === 'added',
+    onclick: (e) => { e.stopPropagation(); web.state === 'done' ? call('open_folder', { path: S.dl.dir }).catch(showError) : startWebDownload(web); },
+  }, actionLabel);
+  const meta = web.state === 'downloading'
+    ? `${fmtBytes(web.downloaded)}${web.total ? ` / ${fmtBytes(web.total)}` : ''}`
+    : web.state === 'added' ? 'added to transfers' : web.state === 'done' ? 'downloaded' : web.state === 'error' ? 'download failed' : kind === 'magnet' ? 'magnet link' : kind === 'torrent' ? 'torrent file' : 'direct file';
+  return h('div', {
+    class: `sleeve website ${web.state === 'downloading' ? 'busy' : ''} ${web.state === 'error' ? 'dim' : ''}`,
+    role: 'button', tabindex: '0', style: `--i:${i}`, dataset: { key: item.key }, title: web.url,
+    onclick: () => web.state === 'done' ? call('open_folder', { path: S.dl.dir }).catch(showError) : web.state !== 'added' && startWebDownload(web),
+    onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startWebDownload(web); } },
+  },
+    h('div', { class: 'pocket' }, web.state === 'downloading' ? h('div', { class: 'ring', style: `--p:${pct}; --ring-color: var(--violet)` }) : null, discEl(item)),
+    sticker ? h('div', { class: `sticker ${sticker[1]}` }, sticker[0]) : null,
+    h('div', { class: 'strip' }, h('div', { class: 'strip-title' }, web.name), h('div', { class: 'strip-meta' }, h('span', { class: 'meta-text' }, meta), action)));
+}
+
 function sleeveEl(item, i) {
+  if (item.web) return webSleeveEl(item, i);
   if (item.torrent) return torrentSleeveEl(item, i);
   const pct = item.state === 'busy' && S.progress && S.progress.id === item.job.id ? progressPct(S.progress) : 0;
   const sticker = stickerFor(item);
@@ -642,6 +718,30 @@ function renderLocation() {
         h('span', {}, h('b', {}, items.filter((i) => i.state === 'done' || i.state === 'newer').length), ' installed')),
     );
   } else if (S.mode === 'download') {
+    const libraries = S.dl.libraries;
+    const library = activeWebLibrary();
+    const librarySelect = libraries.length ? h('select', {
+      class: 'select web-library-select',
+      onchange: (e) => {
+        S.dl.libraryId = e.target.value || null;
+        S.spread = 0;
+        saveWebLibraries();
+        const hasLibrary = Boolean(activeWebLibrary());
+        e.currentTarget.closest('.web-library-controls')?.querySelectorAll('[data-web-library-action]')
+          .forEach((button) => { button.disabled = !hasLibrary; });
+        renderFilters();
+        renderPages();
+        renderDeck();
+      },
+    },
+      h('option', { value: '', selected: !S.dl.libraryId }, 'Transfers only'),
+      ...libraries.map((entry) => h('option', { value: entry.id, selected: entry.id === S.dl.libraryId }, `${entry.title} (${entry.items.length})`))) : null;
+    const websiteSearch = h('input', {
+      class: 'web-site-search', type: 'search', placeholder: 'Search this website…', autocomplete: 'off', spellcheck: 'false',
+      value: S.dl.siteQuery, disabled: !library, dataset: { webLibraryAction: 'search-input' },
+      oninput: (e) => { S.dl.siteQuery = e.target.value; },
+      onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); searchWebsite(); } },
+    });
     const input = h('input', {
       class: 'magnet', type: 'text', placeholder: 'Paste a magnet link…', spellcheck: 'false', value: S.dl.link,
       oninput: (e) => { S.dl.link = e.target.value; },
@@ -649,6 +749,13 @@ function renderLocation() {
     });
     const totals = S.dl.list.reduce((a, t) => ({ down: a.down + t.down_bps, up: a.up + t.up_bps, active: a.active + (TORRENT_ACTIVE.includes(t.state) ? 1 : 0) }), { down: 0, up: 0, active: 0 });
     appendAll(loc,
+      h('div', { class: 'loc-group web-library-controls' }, h('span', { class: 'loc-label' }, 'Website'),
+        librarySelect,
+        h('button', { class: 'btn primary', onclick: openWebsiteLibraryDialog }, '＋ Add'),
+        websiteSearch,
+        h('button', { class: 'btn violet', dataset: { webLibraryAction: 'search' }, disabled: !library, onclick: searchWebsite }, 'Search'),
+        h('button', { class: 'btn ghost', dataset: { webLibraryAction: 'refresh' }, disabled: !library, onclick: refreshWebsiteLibrary, title: 'Fetch this page again' }, '↻'),
+        h('button', { class: 'btn ghost', dataset: { webLibraryAction: 'remove' }, disabled: !library, onclick: removeWebsiteLibrary, title: 'Remove this imported library' }, '✕')),
       h('label', { class: 'magnet-wrap' }, h('span', { class: 'magnet-icon', 'aria-hidden': 'true' }, '🧲'), input),
       h('div', { class: 'loc-group' }, h('span', { class: 'loc-label' }, 'Save to'),
         driveEl(S.dl.dir || '…', null, false),
@@ -657,9 +764,9 @@ function renderLocation() {
       h('button', { class: 'btn ghost', onclick: openTorrentFile }, 'Open .torrent'),
       h('button', { class: 'btn ghost', onclick: openSpeedSettings, title: 'Download and upload speed limits' }, '⚙ Speed'),
       h('div', { class: 'loc-stats' },
-        h('span', {}, '↓ ', h('b', {}, `${fmtBytes(totals.down)}/s`), limitText(S.settings.torrent_down_kbps)),
-        h('span', {}, '↑ ', h('b', {}, `${fmtBytes(totals.up)}/s`), limitText(S.settings.torrent_up_kbps)),
-        h('span', {}, h('b', {}, totals.active), ' active')),
+        h('span', {}, '↓ ', h('b', { id: 'downloadDown' }, `${fmtBytes(totals.down)}/s`), limitText(S.settings.torrent_down_kbps)),
+        h('span', {}, '↑ ', h('b', { id: 'downloadUp' }, `${fmtBytes(totals.up)}/s`), limitText(S.settings.torrent_up_kbps)),
+        h('span', {}, h('b', { id: 'downloadActive' }, totals.active), ' active')),
     );
   } else {
     const m = S.move;
@@ -741,6 +848,20 @@ function renderDeck() {
   } else {
     tray.classList.remove('spinning');
     const last = S.lastResult;
+    const activeWeb = S.dl.libraries.flatMap((library) => library.items).find((item) => item.state === 'downloading');
+    if (activeWeb && !(last && Date.now() - last.at < 8000)) {
+      const pct = webPct(activeWeb);
+      tray.style.backgroundImage = activeWeb.image ? `url("${activeWeb.image}")` : '';
+      tray.classList.add('loaded', 'spinning');
+      tray.classList.toggle('cdr-disc', !activeWeb.image);
+      $('#lcdTitle').textContent = `DOWNLOADING  ${activeWeb.name}`;
+      $('#lcdPct').textContent = activeWeb.total ? `${pct.toFixed(1)}%` : '';
+      $('#lcdFill').style.width = `${pct}%`;
+      $('#lcdStats').textContent = `${fmtBytes(activeWeb.downloaded)}${activeWeb.total ? ` / ${fmtBytes(activeWeb.total)}` : ''}`;
+      $('#lcdEta').textContent = '';
+      $('#lcdFile').textContent = activeWeb.url;
+      return renderQueueList();
+    }
     const activeTorrents = S.dl.list.filter((t) => t.state === 'downloading');
     if (activeTorrents.length && !(last && Date.now() - last.at < 8000)) {
       const top = activeTorrents.slice().sort((a, b) => b.down_bps - a.down_bps)[0];
@@ -771,7 +892,7 @@ function renderDeck() {
       $('#lcdTitle').textContent = 'READY';
       $('#lcdPct').textContent = '';
       $('#lcdFill').style.width = '0%';
-      $('#lcdStats').textContent = { backup: 'PICK A GAME TO BACK IT UP', restore: 'PICK A DISC TO RESTORE IT', move: 'PICK A GAME TO MOVE IT', download: 'PASTE A MAGNET LINK TO START' }[S.mode];
+      $('#lcdStats').textContent = { backup: 'PICK A GAME TO BACK IT UP', restore: 'PICK A DISC TO RESTORE IT', move: 'PICK A GAME TO MOVE IT', download: 'ADD A WEBSITE LIBRARY OR DIRECT DOWNLOAD' }[S.mode];
     }
     $('#lcdEta').textContent = '';
     $('#lcdFile').textContent = '';
@@ -1136,6 +1257,200 @@ async function openTorrentFile() {
   } catch (e) { showError(e); }
 }
 
+function webTitleKey(name) {
+  return String(name || '').normalize('NFKD').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function canonicalInfoHash(hash) {
+  const value = String(hash || '').trim().toUpperCase();
+  if (/^[0-9A-F]{40}$/.test(value)) return value.toLowerCase();
+  if (!/^[A-Z2-7]{32}$/.test(value)) return null;
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let accumulator = 0, bits = 0, hex = '';
+  for (const char of value) {
+    accumulator = (accumulator << 5) | alphabet.indexOf(char);
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      hex += ((accumulator >>> bits) & 0xff).toString(16).padStart(2, '0');
+      accumulator &= bits ? (1 << bits) - 1 : 0;
+    }
+  }
+  return bits === 0 && hex.length === 40 ? hex : null;
+}
+
+function magnetInfoHash(link) {
+  try {
+    const xt = new URL(link).searchParams.getAll('xt')
+      .find((value) => value.toLowerCase().startsWith('urn:btih:'));
+    return canonicalInfoHash(xt?.slice('urn:btih:'.length));
+  } catch { return null; }
+}
+
+/** Keep imported magnet cards in sync with the real transfer list, including removals. */
+function syncWebTransferStates(torrents = S.dl.list) {
+  const activeHashes = new Set(torrents.map((torrent) => canonicalInfoHash(torrent.info_hash)).filter(Boolean));
+  let changed = false;
+  for (const library of S.dl.libraries) {
+    for (const web of library.items || []) {
+      if (web.kind !== 'magnet') continue;
+      const hash = magnetInfoHash(web.url);
+      if (!hash) continue;
+      const next = activeHashes.has(hash) ? 'added' : web.state === 'added' ? 'available' : web.state;
+      if (next !== web.state) {
+        web.state = next;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function dedupeWebItems(items) {
+  const unique = new Map();
+  for (const item of (items || []).filter((entry) => entry.kind === 'magnet')) {
+    const key = webTitleKey(item.name) || item.url;
+    const existing = unique.get(key);
+    if (!existing) unique.set(key, { ...item });
+    else if (!existing.image && item.image) existing.image = item.image;
+  }
+  return [...unique.values()];
+}
+
+function loadWebLibraries() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('steam-transfer.web-libraries') || '[]');
+    if (!Array.isArray(saved)) return;
+    S.dl.libraries = saved.map((library) => ({
+      ...library,
+      id: library.id || library.source_url,
+      items: dedupeWebItems(library.items).map((item) => ({ ...item, state: 'available', downloaded: 0, total: null, path: null, error: null })),
+    }));
+    S.dl.libraryId = localStorage.getItem('steam-transfer.web-library') || S.dl.libraries[0]?.id || null;
+    if (!S.dl.libraries.some((library) => library.id === S.dl.libraryId)) S.dl.libraryId = S.dl.libraries[0]?.id || null;
+  } catch { S.dl.libraries = []; S.dl.libraryId = null; }
+}
+
+function saveWebLibraries() {
+  const clean = S.dl.libraries.map((library) => ({
+    id: library.id, source_url: library.source_url, title: library.title, image: library.image,
+    items: library.items.map(({ name, url, image, kind }) => ({ name, url, image, kind })),
+  }));
+  localStorage.setItem('steam-transfer.web-libraries', JSON.stringify(clean));
+  if (S.dl.libraryId) localStorage.setItem('steam-transfer.web-library', S.dl.libraryId);
+  else localStorage.removeItem('steam-transfer.web-library');
+}
+
+function openWebsiteLibraryDialog() {
+  const input = h('input', { class: 'web-url-input', type: 'url', placeholder: 'https://example.org/', spellcheck: 'false', autocomplete: 'off' });
+  const status = h('p', { class: 'web-import-status' }, 'Add the website once, then search it by title from the Download toolbar.');
+  const add = h('button', { class: 'btn primary', type: 'submit' }, 'Add website');
+  const form = h('form', {
+    class: 'dialog web-import-dialog',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const url = input.value.trim();
+      if (!url) return;
+      input.disabled = true; add.disabled = true; status.textContent = 'Checking the website…';
+      try {
+        await addWebsiteSource(url);
+        closeModal();
+      } catch (error) {
+        input.disabled = false; add.disabled = false; status.textContent = String(error);
+        status.classList.add('error');
+      }
+    },
+  },
+    h('h2', {}, 'Add a website'),
+    h('p', {}, 'Enter the main URL of a website you are allowed to search. Adding it stores the source only; it does not import the whole catalog.'),
+    input,
+    status,
+    h('div', { class: 'actions' }, h('button', { class: 'btn', type: 'button', onclick: closeModal }, 'Cancel'), add));
+  showModal(form, false);
+  setTimeout(() => input.focus(), 30);
+}
+
+async function addWebsiteSource(url, refreshing = false) {
+  const source = await call('inspect_web_source', { url });
+  const current = refreshing ? activeWebLibrary() : null;
+  const entry = {
+    ...source, id: source.source_url, items: current?.items || [],
+  };
+  const old = S.dl.libraries.findIndex((candidate) => candidate.id === entry.id || (refreshing && candidate.id === current?.id));
+  if (old >= 0) S.dl.libraries.splice(old, 1, entry); else S.dl.libraries.push(entry);
+  S.dl.libraryId = entry.id;
+  S.spread = 0;
+  saveWebLibraries();
+  renderAll();
+  toast(refreshing ? 'Website refreshed' : 'Website added', refreshing ? entry.title : `${entry.title} is ready to search.`, 'ok');
+}
+
+async function refreshWebsiteLibrary() {
+  const library = activeWebLibrary();
+  if (!library) return;
+  try { await addWebsiteSource(library.source_url, true); } catch (e) { showError(e); }
+}
+
+async function searchWebsite() {
+  const library = activeWebLibrary();
+  const query = S.dl.siteQuery.trim();
+  if (!library) return toast('Choose a website', 'Pick a website source before searching.', '');
+  if (!query) return toast('Enter a title', 'Type the title you want to find on this website.', '');
+  const controls = $('.web-library-controls');
+  controls?.querySelectorAll('[data-web-library-action]').forEach((control) => { control.disabled = true; });
+  try {
+    const item = await call('search_web_source', { url: library.source_url, query });
+    const before = library.items.length;
+    library.items = dedupeWebItems([...library.items, { ...item, state: 'available', downloaded: 0, total: null, path: null, error: null }]);
+    S.dl.siteQuery = '';
+    S.spread = 0;
+    saveWebLibraries();
+    renderAll();
+    toast(before === library.items.length ? 'Already in this library' : 'Magnet found', item.name, 'ok');
+  } catch (e) {
+    showError(e);
+    controls?.querySelectorAll('[data-web-library-action]').forEach((control) => { control.disabled = false; });
+  }
+}
+
+async function removeWebsiteLibrary() {
+  const library = activeWebLibrary();
+  if (!library) return;
+  const choice = await dialog(`Remove ${library.title}?`, 'This removes the imported catalog only. Files already downloaded are not touched.', [['Cancel', ''], ['Remove', 'danger', 'remove']]);
+  if (choice !== 'remove') return;
+  S.dl.libraries = S.dl.libraries.filter((entry) => entry.id !== library.id);
+  S.dl.libraryId = S.dl.libraries[0]?.id || null;
+  S.spread = 0;
+  saveWebLibraries();
+  renderAll();
+}
+
+async function startWebDownload(web) {
+  if (web.state === 'downloading' || web.state === 'added') return;
+  if (!S.dl.dir) await chooseDownloadDir();
+  if (!S.dl.dir) return;
+  if (web.kind === 'magnet' || web.kind === 'torrent') {
+    try {
+      await call('torrent_add', { link: web.url, folder: S.dl.dir });
+      web.state = 'added';
+      await pollTorrents(true);
+      toast(`${web.name} added`, 'The torrent is now in your transfer list.', 'ok');
+    } catch (e) { web.state = 'error'; web.error = String(e); showError(e); }
+    renderAll();
+    return;
+  }
+  web.state = 'downloading'; web.downloaded = 0; web.total = null; web.error = null;
+  renderAll();
+  try {
+    web.path = await call('download_web_file', { url: web.url, folder: S.dl.dir, name: web.name });
+    web.state = 'done';
+    toast(`${web.name} ✓`, `Saved to ${web.path}`, 'ok');
+  } catch (e) {
+    web.state = 'error'; web.error = String(e); showError(e);
+  }
+  renderAll();
+}
+
 async function chooseDownloadDir() {
   const picked = await call('pick_folder', { title: 'Where should downloads be saved?', start: S.dl.dir }).catch(showError);
   if (!picked) return;
@@ -1156,13 +1471,15 @@ async function torrentPrimary(t) {
 }
 
 async function removeTorrent(t) {
-  const hasFiles = t.id != null && t.progress_bytes > 0;
-  const choice = hasFiles
-    ? await dialog(`Remove ${t.name}?`, 'Keep the downloaded files, or delete them from your disk too?', [['Cancel', ''], ['Delete files too', 'danger', 'delete'], ['Remove, keep files', 'primary', 'keep']])
-    : 'keep';
-  if (choice !== 'keep' && choice !== 'delete') return;
+  const hasFiles = t.id != null;
+  const choice = await dialog(
+    `Remove ${t.name}?`,
+    hasFiles ? 'This deletes the transfer, its downloaded files, and its torrent folder from your disk.' : 'This removes the pending transfer.',
+    [['Cancel', ''], [hasFiles ? 'Remove and delete files' : 'Remove', 'danger', 'remove']],
+  );
+  if (choice !== 'remove') return;
   try {
-    await call('torrent_remove', { key: t.key, deleteFiles: choice === 'delete' });
+    await call('torrent_remove', { key: t.key, deleteFiles: hasFiles });
     await pollTorrents(true);
   } catch (e) { showError(e); }
 }
@@ -1192,7 +1509,7 @@ function refreshOpenTorrent() {
   const t = S.dl.list.find((x) => x.key === openTorrent.key);
   if (!t) return;
   const rows = torrentFacts(t);
-  const layout = `${t.state}|${t.cover || ''}|${rows.map((r) => r[0]).join(',')}`;
+  const layout = `${t.state}|${torrentArtworkSources(t).join('|')}|${rows.map((r) => r[0]).join(',')}`;
   if (layout !== openTorrent.layout) return openTorrentCase(t);   // stage changed: rebuild
   for (const [id, , value, cls] of rows) {
     const dd = openTorrent.cells.get(id);
@@ -1219,11 +1536,18 @@ function openTorrentCase(t) {
   if (t.cover) actions.push(h('button', { class: 'btn', onclick: () => resetCover(t) }, 'Reset cover'));
   actions.push(h('button', { class: 'btn danger', onclick: () => { closeModal(); removeTorrent(t); } }, 'Remove'));
   const cdr = () => h('div', { class: 'case-front cdr-case' }, h('div', { class: 'cdr-big' }, h('div', { class: 'initials dark' }, initials(t.name) || '♪')));
+  const artwork = torrentArtworkSources(t);
   let front = cdr();
-  if (t.cover) {
+  if (artwork.length) {
     front = h('div', { class: 'case-front' });
-    const img = h('img', { alt: '', src: t.cover });
-    img.onerror = () => front.replaceWith(cdr());
+    const img = h('img', { alt: '', referrerpolicy: 'no-referrer' });
+    let n = 0;
+    img.onerror = () => {
+      n++;
+      if (n < artwork.length) img.src = artwork[n];
+      else front.replaceWith(cdr());
+    };
+    img.src = artwork[0];
     front.append(img);
   }
   const rebuilding = openTorrent && openTorrent.key === t.key && modalOpen();
@@ -1233,7 +1557,7 @@ function openTorrentCase(t) {
       h('div', { class: 'sub' }, 'Torrent download'),
       h('dl', { class: 'facts' }, facts),
       h('div', { class: 'actions' }, actions))), true, () => { openTorrent = null; });
-  openTorrent = { key: t.key, layout: `${t.state}|${t.cover || ''}|${rows.map((r) => r[0]).join(',')}`, cells };
+  openTorrent = { key: t.key, layout: `${t.state}|${artwork.join('|')}|${rows.map((r) => r[0]).join(',')}`, cells };
 }
 
 const limitText = (kbps) => (kbps ? h('span', { class: 'limit' }, ` / max ${fmtBytes(kbps * 1024)}/s`) : null);
@@ -1288,12 +1612,13 @@ let torrentTimer = null;
 async function pollTorrents(force) {
   let list;
   try { list = await call('torrent_list'); } catch { return; }
-  const signature = list.map((t) => `${t.key}:${t.state}:${t.name}:${t.cover || ''}`).join('|');
-  const changed = signature !== S.dl.signature;
+  const signature = list.map((t) => `${t.key}:${t.state}:${t.name}:${t.info_hash || ''}:${t.cover || ''}`).join('|');
+  const webStatesChanged = syncWebTransferStates(list);
+  const changed = signature !== S.dl.signature || webStatesChanged;
   S.dl.list = list;
   S.dl.signature = signature;
   if (S.mode === 'download') {
-    if (changed || force) renderAll();
+    if (changed || force) renderDownloadContent();
     else updateTorrentSleeves();
   }
   refreshOpenTorrent();
@@ -1309,7 +1634,26 @@ function updateTorrentSleeves() {
     const meta = el.querySelector('.meta-text');
     if (meta) meta.textContent = torrentMeta(t);
   }
-  renderLocation();
+  updateDownloadLocationStats();
+}
+
+function updateDownloadLocationStats() {
+  const totals = S.dl.list.reduce((summary, torrent) => ({
+    down: summary.down + torrent.down_bps,
+    up: summary.up + torrent.up_bps,
+    active: summary.active + (TORRENT_ACTIVE.includes(torrent.state) ? 1 : 0),
+  }), { down: 0, up: 0, active: 0 });
+  const down = $('#downloadDown'), up = $('#downloadUp'), active = $('#downloadActive');
+  if (down) down.textContent = `${fmtBytes(totals.down)}/s`;
+  if (up) up.textContent = `${fmtBytes(totals.up)}/s`;
+  if (active) active.textContent = totals.active;
+}
+
+function renderDownloadContent() {
+  renderFilters();
+  renderPages();
+  updateDownloadLocationStats();
+  renderDeck();
 }
 
 function startTorrentPolling() {
@@ -1534,11 +1878,11 @@ function bindUi() {
     $('#winMax').addEventListener('click', () => win.toggleMaximize());
     $('#winClose').addEventListener('click', () => win.close());
     win.onCloseRequested?.(async (event) => {
-      const downloading = S.dl.list.some((t) => TORRENT_ACTIVE.includes(t.state));
+      const downloading = S.dl.list.some((t) => TORRENT_ACTIVE.includes(t.state)) || S.dl.libraries.some((library) => library.items.some((item) => item.state === 'downloading'));
       if (!S.queue.current && !S.queue.pending.length && !downloading) return;
       event.preventDefault();
       if (!S.queue.current && !S.queue.pending.length) {
-        const c = await dialog('Downloads are still running', 'Torrent downloads pause while Steam Transfer is closed and carry on the next time you open it.', [['Keep open', ''], ['Close anyway', 'danger', 'quit']]);
+        const c = await dialog('Downloads are still running', 'Closing now interrupts active downloads. Torrent transfers can resume later; direct website downloads restart from the beginning.', [['Keep open', ''], ['Close anyway', 'danger', 'quit']]);
         if (c === 'quit') win.destroy();
         return;
       }
@@ -1552,6 +1896,16 @@ function bindUi() {
 }
 
 async function bindEvents() {
+  await S.api.listen('web-download-progress', (e) => {
+    const progress = e.payload;
+    const web = S.dl.libraries.flatMap((library) => library.items).find((item) => item.url === progress.url);
+    if (!web) return;
+    web.state = progress.state;
+    web.downloaded = progress.downloaded || 0;
+    web.total = progress.total || null;
+    if (progress.path) web.path = progress.path;
+    if (S.mode === 'download') { renderPages(); renderDeck(); renderFilters(); }
+  });
   await S.api.listen('queue', (e) => {
     const hadCurrent = S.queue.current?.id;
     S.queue = e.payload;
@@ -1582,6 +1936,7 @@ async function bindEvents() {
 async function main() {
   if (!window.__TAURI__) await loadScript('mock.js');
   S.api = window.__TAURI__ ? tauriApi() : window.MockApi;
+  loadWebLibraries();
   bindUi();
   await bindEvents();
   computeLayout();

@@ -37,6 +37,26 @@ npm run build        # release build + installer in src-tauri/target/release/bun
 To preview the UI with sample data in a normal browser, serve the `ui/` folder
 (`python -m http.server --directory ui`). `ui/mock.js` stands in for the Rust side there.
 
+### Website libraries
+
+Open **Download**, choose **Add** beside **Website**, and enter an authorized site's main URL. This
+stores the source without importing its entire catalog. Select that source, type a title in the
+website search box, and press **Search**. Steam Transfer requests `?s=<your query>`, chooses the first
+same-site result whose visible title contains the query, opens that result page, and adds its first
+magnet plus artwork to the library. Magnet cards are handed to the built-in torrent transfer engine.
+
+Magnet detection checks ordinary `href` links as well as magnet-labeled buttons and images. It
+reads visible text, image `alt` text, ARIA/title labels, `data-magnet`, `data-url`, `data-href`, and
+`onclick` values, including URL-encoded magnet links. Generic labels such as “Magnet” use the
+magnet's `dn=` name or the child page title so unrelated items do not collapse as duplicates.
+
+Duplicate titles are shown once (case, spacing, and punctuation differences are ignored), and
+artwork from a duplicate can fill a missing cover on the kept item. Search results never follow a
+link to a different website.
+
+The generic importer supports ordinary server-rendered HTML. JavaScript-only catalogs, sign-in
+flows, and site-specific buttons may require a dedicated provider.
+
 ### Layout
 
 ```

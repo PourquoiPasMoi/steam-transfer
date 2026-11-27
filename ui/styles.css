@@ -255,6 +255,16 @@ button:disabled { cursor: default; }
   user-select: text; -webkit-user-select: text;
 }
 .magnet::placeholder { color: #a39a87; }
+.web-library-select { max-width: 220px; }
+.web-library-controls { flex: 1 1 100%; }
+.web-site-search {
+  flex: 1 1 220px; min-width: 150px; max-width: 420px;
+  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 6px; outline: 0;
+  padding: 6px 10px; background: rgba(0, 0, 0, 0.25); color: var(--ink);
+  font: 13px var(--font-ui); user-select: text; -webkit-user-select: text;
+}
+.web-site-search:focus { border-color: #a98cf0; box-shadow: 0 0 0 2px rgba(169, 140, 240, 0.15); }
+.web-site-search:disabled { opacity: 0.45; }
 .loc-stats { margin-left: auto; display: flex; gap: 14px; color: var(--ink-dim); font-size: 12.5px; flex-wrap: wrap; }
 .loc-stats b { color: var(--ink); font-weight: 700; }
 .arrow { display: flex; align-items: center; }
@@ -905,6 +915,16 @@ button:disabled { cursor: default; }
 .dialog .btn.primary { background: linear-gradient(180deg, #f2c14e, #d39a28); color: #24180a; border-color: #c48d1e; }
 .dialog .btn.danger { background: linear-gradient(180deg, #e0574d, #b83a31); color: #fff; border-color: #a2342c; }
 .dialog progress { width: 100%; height: 10px; margin-bottom: 14px; accent-color: var(--orange); }
+.web-url-input {
+  box-sizing: border-box; width: 100%; margin: 0 0 10px; padding: 10px 12px;
+  border: 1px solid #cfc5ae; border-radius: 5px; outline: 0;
+  background: #fffdf8; color: var(--marker); font: 15px var(--font-ui);
+}
+.web-url-input:focus { border-color: #8f6be0; box-shadow: 0 0 0 3px rgba(143, 107, 224, 0.16); }
+.web-crawl-option { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 13.5px; cursor: pointer; }
+.web-crawl-option input { width: 16px; height: 16px; accent-color: #8f6be0; }
+.dialog .web-import-status { min-height: 20px; margin-bottom: 14px; color: #6f6857; font-size: 12.5px; }
+.dialog .web-import-status.error { color: #a2342c; }
 
 /* ---------------------------------------------------------------- toasts (sticky notes) */
 .toasts {

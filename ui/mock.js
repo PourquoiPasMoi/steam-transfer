@@ -99,6 +99,37 @@
   }, 1000);
 
   const handlers = {
+    inspect_web_source: ({ url }) => ({ source_url: url, title: new URL(url).hostname, image: null }),
+    search_web_source: ({ query }) => ({
+      name: query,
+      url: `magnet:?xt=urn:btih:${'1'.repeat(40)}&dn=${encodeURIComponent(query)}`,
+      image: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1621690/library_600x900.jpg',
+      kind: 'magnet',
+    }),
+    scrape_web_library: ({ url, crawlLinkedPages }) => {
+      if (crawlLinkedPages) {
+        emit('web-library-progress', { checked: 0, total: 7, current: `${url}item-1` });
+        emit('web-library-progress', { checked: 7, total: 7, current: '' });
+      }
+      return {
+        source_url: url,
+        title: 'Sample website library',
+        image: null,
+        scanned_pages: crawlLinkedPages ? 7 : 1,
+        items: [
+          { name: 'Open media magnet', url: 'magnet:?xt=urn:btih:0123456789abcdef&dn=Open+Media', image: 'https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/1621690/library_600x900.jpg', kind: 'magnet' },
+        ],
+      };
+    },
+    download_web_file: ({ url, folder, name }) => new Promise((resolve) => {
+      const total = 64 * 1024 * 1024;
+      let downloaded = 0;
+      const timer = setInterval(() => {
+        downloaded = Math.min(total, downloaded + 4 * 1024 * 1024);
+        emit('web-download-progress', { url, name, downloaded, total, state: downloaded === total ? 'done' : 'downloading', path: downloaded === total ? `${folder}\\${name}` : null });
+        if (downloaded === total) { clearInterval(timer); resolve(`${folder}\\${name}`); }
+      }, 120);
+    }),
     torrent_default_dir: () => 'C:\\Users\\You\\Downloads',
     torrent_list: () => JSON.parse(JSON.stringify(torrents)),
     torrent_add: ({ link }) => { const key = `t${tNext++}`; const n = /dn=([^&]+)/.exec(link); torrents.push({ ...T(key, n ? decodeURIComponent(n[1].replace(/\+/g, ' ')) : 'Fetching torrent info…', 'fetching', 0, 0, 0), id: null }); return key; },
